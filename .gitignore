@@ -1,0 +1,12 @@
+# All dot files/dirs in root (.env, .venv, etc.)
+/.*
+!/.gitignore
+!/.env.example
+
+AGENTS.md
+CLAUDE.md
+
+__pycache__/
+.ipynb_checkpoints/
+
+/data/**/*.pkl
