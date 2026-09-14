@@ -1,4 +1,6 @@
+import pickle
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # not installed: package sits at the repo root
@@ -109,6 +111,53 @@ def test_push_chunks_batches_requests():
     assert set(calls[0][1][0]) == {"id", "content", "embedding", "metadata"}, "ingest API contract"
 
 
+def test_ingest_paths_derives_doc_type_from_file_name():
+    pushed = []
+    originals = (ingest.get_emb, ingest._embed_batched, ingest.push_chunks)
+    ingest.get_emb = lambda: FakeEmb()
+    ingest._embed_batched = lambda emb, texts, desc="": [[0.0] for _ in texts]
+    ingest.push_chunks = lambda ids, contents, embeddings, metas, desc="": pushed.extend(metas)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("events", "custom"):
+                with open(Path(d) / f"{name}.pkl", "wb") as f:
+                    pickle.dump([{"content": "c", "metadata": {}}], f)
+
+            ingest.ingest_paths([d])
+            assert {m["source"]: m["doc_type"] for m in pushed} == {"events.pkl": "event", "custom.pkl": "docs"}, \
+                "known pipeline stems map to their doc_type, anything else falls back to docs"
+
+            pushed.clear()
+            ingest.ingest_paths([d], doc_type="faq")
+            assert {m["doc_type"] for m in pushed} == {"faq"}, "--doc-type overrides the file-name default"
+    finally:
+        ingest.get_emb, ingest._embed_batched, ingest.push_chunks = originals
+
+
+def test_main_build_runs_pipeline_then_reset_then_push():
+    from bdc_doc_builder.preproc import pipeline
+    calls = []
+    originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
+    pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or [Path("data/docs.pkl")]
+    ingest.reset_remote = lambda: calls.append(("reset",))
+    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False: calls.append(("push", [str(p) for p in paths])) or 0
+    try:
+        ingest.main(["--build", "--sources", "docs", "--no-contextualize", "--reset", "extra.md"])
+    finally:
+        pipeline.build, ingest.reset_remote, ingest.ingest_paths = originals
+
+    assert calls == [("build", ["docs"], True), ("reset",), ("push", [str(Path("data/docs.pkl")), "extra.md"])], \
+        "pipeline args pass through; build before reset (a failed build must not empty the DB); push built + given"
+
+
+def test_main_requires_paths_or_build():
+    try:
+        ingest.main([])
+        assert False, "expected an argparse error"
+    except SystemExit as e:
+        assert e.code == 2
+
+
 if __name__ == "__main__":
     test_batching_respects_token_budget()
     test_oversized_single_text_is_truncated()
@@ -116,4 +165,7 @@ if __name__ == "__main__":
     test_embed_batched_reraises_after_exhausting_retries()
     test_ids_are_stable_and_unique()
     test_push_chunks_batches_requests()
+    test_ingest_paths_derives_doc_type_from_file_name()
+    test_main_build_runs_pipeline_then_reset_then_push()
+    test_main_requires_paths_or_build()
     print("ingest self-check passed")

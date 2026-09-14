@@ -19,17 +19,6 @@ WEBSITE_DIR = os.getenv("BDC_WEBSITE_DIR", "../interim-bdc-website/")
 GITBOOK_DIR = os.getenv("BDC_GITBOOK_DIR", "../bdc-gitbook/")
 DATA_DIR = os.getenv("PREPROC_DATA_DIR", "./data/")
 
-# pkl file name -> doc_type, mirroring BDC_Chatbot utils/prepare_chromadb.py
-SOURCE_DOC_TYPES = {
-    "fellows": "fellow",
-    "latest_updates": "update",
-    "events": "event",
-    "pages": "page",
-    "freshdesk": "faq",
-    "docs": "docs",
-    "vids": "video",
-}
-
 # pages hand-picked in preproc_doc.py
 PAGE_DIR_PATHS = ["use-bdc/analyze-data/"]
 PAGE_FILE_PATHS = [
@@ -38,14 +27,6 @@ PAGE_FILE_PATHS = [
     "about/key-collaborations.mdx", "about/overview.mdx", "about/research-communities.mdx",
     "use-bdc/explore-data/index.mdx",
 ]
-
-
-def _drop_nested(metadata):
-    """Chroma metadata must be scalar; the original dropped dict/list-of-dict values."""
-    for key in [k for k, v in metadata.items()
-                if isinstance(v, dict) or (isinstance(v, list) and v and isinstance(v[0], dict))]:
-        del metadata[key]
-    return metadata
 
 
 def build_fellows():
@@ -58,7 +39,6 @@ def build_fellows():
         if project:
             fellow["metadata"]["project_title"] = project.get("title")
             fellow["metadata"]["project_abstract"] = project.get("abstract")
-        _drop_nested(fellow["metadata"])
     return fellows
 
 
@@ -76,7 +56,6 @@ def _build_dated_mdx(subdir):
             meta["date_num"] = int(str(meta["date"]).replace("-", ""))
         if isinstance(meta.get("tags"), list):
             meta["tags"] = ", ".join(str(t) for t in meta["tags"])
-        _drop_nested(meta)
     return rows
 
 
@@ -108,7 +87,6 @@ def build_pages(contextualize=True):
             header["headings"] = ", ".join(pair["heading"] for pair in header["menu"])
             header["hrefs"] = ", ".join(pair["href"] for pair in header["menu"])
             del header["menu"]
-        _drop_nested(header)
 
         for section in split_by_sections(page_content):
             meta = dict(header)
@@ -184,31 +162,23 @@ BUILDERS = {
 }
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Preprocess BDC sources into .pkl (and optionally push them to bdc-doc-mcp)")
-    parser.add_argument("--sources", nargs="+", default=["all"],
-                        help=f"any of: all, {', '.join(BUILDERS)}")
+def add_args(parser):
+    """Preprocessing options. Defined once here and attached to both this module's CLI and
+    `ingest --build`, which then hands its parsed args straight to build()."""
+    parser.add_argument("--sources", nargs="+", default=["all"], choices=["all", *BUILDERS], metavar="SOURCE",
+                        help=f"any of: all, {', '.join(BUILDERS)} (default: all)")
     parser.add_argument("--no-contextualize", action="store_true",
                         help="skip the LLM contextualizer (much faster/cheaper, weaker retrieval)")
-    parser.add_argument("--ingest", action="store_true",
-                        help="also embed and push the produced .pkl to the bdc-doc-mcp service")
-    parser.add_argument("--ingest-only", action="store_true",
-                        help="skip preprocessing and push the existing .pkl files (rebuild the DB cheaply)")
-    parser.add_argument("--summarize", action="store_true",
-                        help="embed an LLM summary for records without a contextualized chunk "
-                             "(fellows/events/updates), matching prepare_chromadb's use_summary=True")
     parser.add_argument("--pull", action="store_true",
                         help="git pull the website/gitbook source repos before preprocessing "
                              "(--ff-only: fails instead of merging if a repo has local commits)")
-    parser.add_argument("--reset", action="store_true", help="drop the remote collection before pushing")
-    parser.add_argument("--data-dir", default=DATA_DIR)
-    args = parser.parse_args()
+    parser.add_argument("--data-dir", default=DATA_DIR, help="where the .pkl files go (default: %(default)s)")
 
+
+def build(args) -> list[Path]:
+    """Preprocess the selected sources into <data-dir>/<source>.pkl; returns the paths written.
+    `args` is a namespace parsed through add_args()."""
     sources = list(BUILDERS) if "all" in args.sources else args.sources
-    unknown = [s for s in sources if s not in BUILDERS]
-    if unknown:
-        parser.error(f"unknown sources: {unknown}")
 
     if args.pull:
         for repo in (WEBSITE_DIR, GITBOOK_DIR):
@@ -219,28 +189,25 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     contextualize = not args.no_contextualize
 
-    produced = []
+    paths = []
     for name in sources:
-        path = out_dir / f"{name}.pkl"
-        if args.ingest_only:
-            if path.exists():
-                produced.append((path, SOURCE_DOC_TYPES[name]))
-            else:
-                print(f"{name}: no {path}, skipping")
-            continue
         print(f"\n=== {name} ===")
         rows = BUILDERS[name](contextualize)
+        path = out_dir / f"{name}.pkl"
         with open(path, "wb") as f:
             pickle.dump(rows, f)
         print(f"{name}: {len(rows)} records -> {path}")
-        produced.append((path, SOURCE_DOC_TYPES[name]))
+        paths.append(path)
+    return paths
 
-    if args.ingest or args.ingest_only:
-        from ..ingest import ingest_paths, reset_remote
-        if args.reset:
-            reset_remote()
-        for path, doc_type in produced:
-            ingest_paths([path], doc_type, args.summarize)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Preprocess BDC sources into .pkl files without pushing them "
+                    "(`python -m bdc_doc_builder.ingest --build` does both)")
+    add_args(parser)
+    paths = build(parser.parse_args())
+    print(f"\npush with: python -m bdc_doc_builder.ingest {' '.join(str(p) for p in paths)} [--reset]")
 
 
 if __name__ == "__main__":

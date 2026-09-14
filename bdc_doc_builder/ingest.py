@@ -14,6 +14,18 @@ from .config import get_emb
 
 SUPPORTED = {".pkl", ".md", ".mdx", ".txt", ".pdf"}
 
+# file stem -> doc_type for the .pkl files preproc.pipeline writes (mirrors BDC_Chatbot's
+# prepare_chromadb.py); anything else defaults to "docs" unless --doc-type is given
+SOURCE_DOC_TYPES = {
+    "fellows": "fellow",
+    "latest_updates": "update",
+    "events": "event",
+    "pages": "page",
+    "freshdesk": "faq",
+    "docs": "docs",
+    "vids": "video",
+}
+
 _splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
 
 _FRONTMATTER = re.compile(r"\A---\n.*?\n---\n", re.S)
@@ -157,16 +169,18 @@ def push_chunks(ids, contents, embeddings, metas, desc="pushing"):
         ])
 
 
-def ingest_paths(paths, doc_type: str = "docs", use_summary: bool = False) -> int:
-    """Load, embed, and push all supported files under the given paths."""
+def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) -> int:
+    """Load, embed, and push all supported files under the given paths.
+    doc_type applies to every chunk; None derives it per file from SOURCE_DOC_TYPES."""
     emb = get_emb()
     total = 0
     for f in iter_files(paths):
+        file_doc_type = doc_type or SOURCE_DOC_TYPES.get(f.stem, "docs")
         if f.suffix == ".pkl":
-            contents, metas, embed_texts = load_pkl(f, doc_type, use_summary)
+            contents, metas, embed_texts = load_pkl(f, file_doc_type, use_summary)
         else:
             loader = load_pdf if f.suffix == ".pdf" else load_text
-            contents, metas, embed_texts = loader(f, doc_type)
+            contents, metas, embed_texts = loader(f, file_doc_type)
         if not contents:
             continue
         embeddings = _embed_batched(emb, embed_texts, desc=f"embedding {f.name}")
@@ -177,19 +191,32 @@ def ingest_paths(paths, doc_type: str = "docs", use_summary: bool = False) -> in
     return total
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Embed documents and push them to the bdc-doc-mcp service")
-    parser.add_argument("paths", nargs="+", help="files or directories (.pkl .md .mdx .txt .pdf)")
-    parser.add_argument("--doc-type", default="docs")
-    parser.add_argument("--reset", action="store_true", help="drop the remote collection first")
+def main(argv=None):
+    from .preproc import pipeline  # lazy: pulls in the scraper deps (pandas, bs4, ...)
+
+    parser = argparse.ArgumentParser(
+        description="Build the bdc-doc-mcp database: embed documents and push them to its ingest API. "
+                    "Push existing files, or --build to preprocess the BDC sources first. See docs/cli.md.")
+    parser.add_argument("paths", nargs="*", help="files or directories to push (.pkl .md .mdx .txt .pdf)")
+    parser.add_argument("--doc-type",
+                        help="metadata doc_type for every chunk; default derives from the file name "
+                             f"({', '.join(f'{k}.pkl->{v}' for k, v in SOURCE_DOC_TYPES.items())}), else docs")
+    parser.add_argument("--reset", action="store_true", help="drop the remote collection before pushing")
     parser.add_argument("--summarize", action="store_true",
                         help="embed an LLM summary for .pkl records lacking a contextualized chunk")
-    args = parser.parse_args()
+    build = parser.add_argument_group(
+        "build from source",
+        "--build runs preproc.pipeline first and pushes what it wrote; the other options here pass through to it")
+    build.add_argument("--build", action="store_true", help="preprocess the BDC sources before pushing")
+    pipeline.add_args(build)
+    args = parser.parse_args(argv)
+    if not args.paths and not args.build:
+        parser.error("nothing to do: give paths to push, or --build to preprocess the sources first")
 
+    built = pipeline.build(args) if args.build else []  # before --reset: a failed build must not empty the DB
     if args.reset:
         reset_remote()
-
-    total = ingest_paths(args.paths, args.doc_type, args.summarize)
+    total = ingest_paths(built + args.paths, args.doc_type, args.summarize)
     print(f"done: pushed {total} chunks to {os.getenv('DOC_MCP_URL', 'http://127.0.0.1:8000')}")
 
 

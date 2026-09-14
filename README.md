@@ -7,9 +7,10 @@ bdc-doc-mcp's ingest API. It never touches the database directly.
 
 ```
 bdc_doc_builder/config.py   env-driven embeddings/LLM clients
-bdc_doc_builder/ingest.py   .pkl/.md/.mdx/.txt/.pdf → embeddings → push to bdc-doc-mcp
-bdc_doc_builder/preproc/    source-specific preprocessing pipeline
-data/                       preproc output (*.pkl), push input
+bdc_doc_builder/ingest.py   the CLI: [--build] → embed → push to bdc-doc-mcp
+bdc_doc_builder/preproc/    source-specific preprocessing → data/*.pkl (never touches the DB)
+data/                       preproc output (*.pkl), ingest input
+docs/cli.md                 CLI reference
 ```
 
 ## Setup
@@ -38,30 +39,35 @@ change on the server side.
 
 ## Build & push
 
-bdc-doc-mcp's API must be running (`uv run uvicorn bdc_doc_mcp.api:app --port 8000` over
-there) with the same `INGEST_TOKEN` set.
+`bdc_doc_builder.ingest` is the CLI. bdc-doc-mcp's API must be running
+(`uv run uvicorn bdc_doc_mcp.api:app --port 8000` over there) with the same `INGEST_TOKEN` set.
 
-Full rebuild from every source (needs the two source repos cloned; writes `data/*.pkl`,
-then embeds and pushes them):
-
-```bash
-uv run python -m bdc_doc_builder.preproc.pipeline --sources all --ingest --reset
-```
-
-Re-push existing `.pkl` files without re-preprocessing:
+**Build and push from scratch** in one command. Needs the two source repos cloned;
+preprocesses them into `data/*.pkl`, then embeds and pushes:
 
 ```bash
-uv run python -m bdc_doc_builder.preproc.pipeline --ingest-only --reset
+uv run python -m bdc_doc_builder.ingest --build --reset
 ```
 
-Individual files or directories:
+**Build with `pipeline`, push with `ingest`.** Same result in two steps, for when the server
+isn't up yet or you want to inspect the `.pkl` files before they go anywhere:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest ./data/docs.pkl --doc-type docs
-uv run python -m bdc_doc_builder.ingest ../interim-bdc-website/src/pages --doc-type page --reset
+uv run python -m bdc_doc_builder.preproc.pipeline --sources all
+uv run python -m bdc_doc_builder.ingest data/ --reset
 ```
 
-`--no-contextualize` skips the per-chunk LLM call (much faster, weaker retrieval).
+The second line on its own re-pushes the existing `data/*.pkl` without re-preprocessing,
+e.g. after switching embedding models.
+
+**Refresh one source**, leaving the rest of the DB as it is:
+
+```bash
+uv run python -m bdc_doc_builder.ingest --build --sources docs
+```
+
+`--no-contextualize` on either build command skips the per-chunk LLM call (much faster,
+weaker retrieval). Every flag and environment variable is in [docs/cli.md](docs/cli.md).
 
 ## Preprocessing
 
@@ -74,7 +80,7 @@ uv run python -m bdc_doc_builder.ingest ../interim-bdc-website/src/pages --doc-t
 | `freshdesk.py` | bdcatalyst.freshdesk.com | `utils/preproc/proc_freshdesk.py` | live scrape |
 | `vids.py` | Google Sheet + Drive SRT | `utils/preproc/proc_BDC_vids.py` (GoogleSheetsReader class flattened) | video transcripts with timestamp URLs |
 | `utils.py` | — | — | LLM chunk contextualizer + summarizer |
-| `pipeline.py` | — | `utils/preproc_doc.py` | orchestrator |
+| `pipeline.py` | — | `utils/preproc_doc.py` | orchestrator: sources → `data/*.pkl`; pushing is `ingest.py`'s job |
 
 ## Tests
 
