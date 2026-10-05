@@ -10,3 +10,4 @@ __pycache__/
 .ipynb_checkpoints/
 
 /data/**/*.pkl
+/data/repos/

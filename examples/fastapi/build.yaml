@@ -1,0 +1,9 @@
+# r-doc-builder build settings for the FastAPI documentation (CONFIG_DIR=examples/fastapi).
+# Same keys as the template build.yaml; rebuild and re-push (ingest --build --reset) after editing.
+# Every source here is markdown, so only the chunk settings matter.
+
+chunk_size: 1500
+chunk_overlap: 200
+html_drop_tags: [script, style, nav, header, footer, noscript]
+html_main_tags: [main, article, body]
+youtube_lang: en

@@ -1,0 +1,23 @@
+# FastAPI documentation (CONFIG_DIR=examples/fastapi; builds into data/fastapi/), from the English markdown
+# in github.com/fastapi/fastapi. doc_type values are the ones r-doc-mcp's examples/fastapi/doc_types.yaml declares.
+# Code samples are not indexed: the pages pull them in with {* ../../docs_src/... *} lines, which stay as text.
+# Not listed: reference/ (generated from docstrings; its markdown holds only the directives), the
+# people/sponsor/translation/contributing pages, and the other languages.
+- source_type: git
+  doc_type: tutorial
+  link: https://github.com/fastapi/fastapi#docs/en/docs/tutorial   # one clone, shared by the four git entries
+- source_type: git
+  doc_type: advanced
+  link: https://github.com/fastapi/fastapi#docs/en/docs/advanced
+- source_type: git
+  doc_type: how-to
+  link: https://github.com/fastapi/fastapi#docs/en/docs/how-to
+- source_type: git
+  doc_type: deployment
+  link: https://github.com/fastapi/fastapi#docs/en/docs/deployment
+- source_type: yaml
+  doc_type: page
+  link: pages.yaml   # the top-level pages; its entries inherit doc_type page
+- source_type: url
+  doc_type: release
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/release-notes.md   # one big page, a section per version

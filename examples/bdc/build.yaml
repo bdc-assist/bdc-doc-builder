@@ -1,0 +1,8 @@
+# r-doc-builder build settings for the NHLBI BioData Catalyst sources (CONFIG_DIR=examples/bdc).
+# Same keys as the template build.yaml; rebuild and re-push (ingest --build --reset) after editing.
+
+chunk_size: 1500     # as bdc-doc-builder chunked
+chunk_overlap: 200
+html_drop_tags: [script, style, nav, header, footer, noscript]
+html_main_tags: [main, article, body]
+youtube_lang: en

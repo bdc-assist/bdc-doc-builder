@@ -1,26 +1,26 @@
 # CLI reference
 
-One entry point does everything: `bdc_doc_builder.ingest`. It embeds documents and pushes
-them to bdc-doc-mcp's ingest API, and with `--build` it first runs the preprocessing
-pipeline over the BDC sources. `bdc_doc_builder.preproc.pipeline` is also runnable on its
-own when you only want the preprocessing.
+One entry point does everything: `r_doc_builder.ingest`. It embeds documents and pushes
+them to r-doc-mcp's ingest API, and with `--build` it first runs the preprocessing
+pipeline over the sources listed in `sources.yaml`. `r_doc_builder.pipeline` is also runnable
+on its own when you only want the preprocessing.
 
 All commands run from the repo root with `uv run`.
 
 ## Before you start
 
 - `.env` filled in (`cp .env.example .env`). See [Environment](#environment).
-- bdc-doc-mcp's API running with the same `INGEST_TOKEN`:
-  `uv run uvicorn bdc_doc_mcp.api:app --port 8000` in that repo.
-- For `--build`: the two source repos cloned next to this one (or `BDC_WEBSITE_DIR` /
-  `BDC_GITBOOK_DIR` pointing at them), plus a completion LLM configured for the
-  contextualizer unless you pass `--no-contextualize`.
+- r-doc-mcp's API running with the same `INGEST_TOKEN`:
+  `uv run uvicorn r_doc_mcp.api:app --port 8000` in that repo.
+- For `--build`: the sources listed in `sources.yaml` (git sources are cloned automatically
+  into `REPOS_DIR`), plus a completion LLM configured for the contextualizer unless you pass
+  `--no-contextualize`.
 
-## `python -m bdc_doc_builder.ingest`
+## `python -m r_doc_builder.ingest`
 
 ```text
-uv run python -m bdc_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize]
-        [--build [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]]
+uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize]
+        [--build [--yaml F] [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]]
 ```
 
 Pushes every supported file under `paths`. With `--build`, preprocesses first and pushes
@@ -30,28 +30,19 @@ required.
 | Option | What it does |
 | --- | --- |
 | `paths` | Files or directories. Directories are searched recursively for `.pkl .md .mdx .txt .pdf`. |
-| `--doc-type T` | `doc_type` metadata for every chunk pushed in this run. Default: derived per file from its name (table below). |
+| `--doc-type T` | `doc_type` metadata for every chunk pushed in this run. Default: whatever each record carries. |
 | `--reset` | Drop the remote collection before pushing. Runs after `--build` finishes, so a failed build leaves the DB untouched. |
-| `--summarize` | For `.pkl` records with no contextualized chunk (fellows, events, latest updates, videos), embed an LLM summary of the content instead of the raw content. One LLM call per record. |
-| `--build` | Run the preprocessing pipeline before pushing. The four options below are passed through to it. |
-| `--sources S ...` | Which sources to preprocess: `all` (default) or any of `fellows latest_updates events pages freshdesk docs vids`. |
+| `--summarize` | For `.pkl` records with no contextualized chunk, embed an LLM summary of the content instead of the raw content. One LLM call per record. |
+| `--build` | Run the preprocessing pipeline before pushing. The options below are passed through to it. |
+| `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
+| `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
 | `--no-contextualize` | Skip the per-chunk LLM contextualizer. Much faster and cheaper; retrieval quality drops. |
-| `--pull` | `git pull --ff-only` the website and gitbook repos first. Fails rather than merging if a repo has local commits. |
-| `--data-dir D` | Where the `.pkl` files are written. Default `./data/` (`PREPROC_DATA_DIR`). |
+| `--pull` | `git pull --ff-only` existing clones of git sources. Without it, clones are reused as they are; missing clones are always cloned. |
+| `--data-dir D` | Where the `.pkl` files are written. Default `./data/<config>/`, the `CONFIG_DIR` folder name (`PREPROC_DATA_DIR`). |
 
-### `doc_type` defaults
-
-When `--doc-type` is not given, each file's type comes from its name. Anything else gets `docs`.
-
-| File | `doc_type` |
-| --- | --- |
-| `fellows.pkl` | `fellow` |
-| `latest_updates.pkl` | `update` |
-| `events.pkl` | `event` |
-| `pages.pkl` | `page` |
-| `freshdesk.pkl` | `faq` |
-| `docs.pkl` | `docs` |
-| `vids.pkl` | `video` |
+Without `--doc-type`, every chunk keeps the doc_type its record carries (set by the
+`doc_type` of `sources.yaml` entries); ad-hoc files and `untyped.pkl` records are pushed
+without one.
 
 Don't combine `--doc-type` with `--build --sources all`: it would label every source the same.
 
@@ -60,72 +51,63 @@ Don't combine `--doc-type` with `--build --sources all`: it would label every so
 Rebuild the database from scratch:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest --build --reset
+uv run python -m r_doc_builder.ingest --build --reset
 ```
 
-Same, after pulling the latest website and gitbook commits, without the LLM contextualizer:
+Same, after pulling the latest commits into any existing git clones, without the LLM
+contextualizer:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest --build --pull --no-contextualize --reset
+uv run python -m r_doc_builder.ingest --build --pull --no-contextualize --reset
 ```
 
-Refresh only the gitbook docs and the FAQ. The two sources are re-preprocessed and
-upserted; everything else in the DB stays as it is:
+Refresh only the `docs` and `faq` doc_types. The two are re-preprocessed and upserted;
+everything else in the DB stays as it is:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest --build --sources docs freshdesk
+uv run python -m r_doc_builder.ingest --build --sources docs faq
 ```
 
-Re-push the existing `data/*.pkl` without re-preprocessing, for example after switching
-embedding models:
+Re-push the existing `data/<config>/*.pkl` without re-preprocessing, for example after switching
+embedding models. Git clones under `data/repos/` are skipped; only the `.pkl` files (and any
+ad-hoc files you drop in that folder) are pushed:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest data/ --reset
+uv run python -m r_doc_builder.ingest data/config/ --reset   # data/bdc/ with CONFIG_DIR=examples/bdc
 ```
 
 Push one file, or an ad-hoc directory of markdown with an explicit type:
 
 ```bash
-uv run python -m bdc_doc_builder.ingest data/docs.pkl
-uv run python -m bdc_doc_builder.ingest ../interim-bdc-website/src/pages --doc-type page
+uv run python -m r_doc_builder.ingest data/docs.pkl
+uv run python -m r_doc_builder.ingest ./some/pages --doc-type page
 ```
 
-## `python -m bdc_doc_builder.preproc.pipeline`
+## `python -m r_doc_builder.pipeline`
 
 ```text
-uv run python -m bdc_doc_builder.preproc.pipeline [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]
+uv run python -m r_doc_builder.pipeline [--yaml F] [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]
 ```
 
-Preprocessing only: writes `<data-dir>/<source>.pkl` and never talks to the database.
+Preprocessing only: writes `<data-dir>/<doc_type>.pkl` and never talks to the database.
 Useful when the MCP server isn't reachable yet, or to preprocess on one machine and push
 from another. The options are the same ones `ingest --build` passes through.
 
 | Option | What it does |
 | --- | --- |
-| `--sources S ...` | Which sources to preprocess: `all` (default) or any of the names in the table below. |
-| `--no-contextualize` | Skip the per-chunk LLM contextualizer. Much faster and cheaper; retrieval quality drops. Only affects sources marked as contextualized below. |
-| `--pull` | `git pull --ff-only` the website and gitbook repos first. Fails rather than merging if a repo has local commits. |
-| `--data-dir D` | Where the `.pkl` files are written. Default `./data/` (`PREPROC_DATA_DIR`). |
+| `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
+| `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
+| `--no-contextualize` | Skip the per-chunk LLM contextualizer. Much faster and cheaper; retrieval quality drops. |
+| `--pull` | `git pull --ff-only` existing clones of git sources. Without it, clones are reused as they are; missing clones are always cloned. |
+| `--data-dir D` | Where the `.pkl` files are written. Default `./data/<config>/`, the `CONFIG_DIR` folder name (`PREPROC_DATA_DIR`). |
 
-### Sources
+Source types and the yaml format are described in the README.
 
-| Source | Reads | Needs | Contextualized |
-| --- | --- | --- | --- |
-| `fellows` | `src/data/fellows/` in the website repo | `BDC_WEBSITE_DIR` | no |
-| `latest_updates` | `src/data/latest-updates/` in the website repo | `BDC_WEBSITE_DIR` | no |
-| `events` | `src/data/events/` in the website repo | `BDC_WEBSITE_DIR` | no |
-| `pages` | hand-picked MDX under `src/pages/` in the website repo | `BDC_WEBSITE_DIR`, LLM | yes, per section |
-| `docs` | markdown in the gitbook repo, chunked by header hierarchy | `BDC_GITBOOK_DIR`, LLM | yes |
-| `freshdesk` | live scrape of bdcatalyst.freshdesk.com | network, LLM | yes |
-| `vids` | Google Sheet of videos plus Drive SRT transcripts and YouTube upload dates | network, LLM | yes |
-
-"LLM" means the completion model is called unless `--no-contextualize` is given.
-
-It prints the `ingest` command for what it wrote. Preprocess one source and push it:
+It prints the `ingest` command for what it wrote. Preprocess one doc_type and push it:
 
 ```bash
-uv run python -m bdc_doc_builder.preproc.pipeline --sources vids
-uv run python -m bdc_doc_builder.ingest data/vids.pkl
+uv run python -m r_doc_builder.pipeline --sources faq
+uv run python -m r_doc_builder.ingest data/faq.pkl
 ```
 
 ## How a push behaves
@@ -133,8 +115,8 @@ uv run python -m bdc_doc_builder.ingest data/vids.pkl
 - Chunk ids are derived from `source`, `page_url`, and content, so pushing the same file
   again updates its chunks instead of duplicating them. Only `--reset` deletes anything.
 - Embeddings go out in batches of about `EMBEDDING_BATCH_TOKENS` tokens; upserts in
-  batches of `PUSH_BATCH` chunks. A failed embedding call is retried five times with
-  exponential backoff (port-forward drops, idle timeouts), then the run aborts.
+  batches of `PUSH_BATCH` chunks. A failed embedding call is retried `RETRIES` times with
+  exponential backoff, then the run aborts.
 - Metadata is filtered to scalar values (str, int, float, bool) before pushing. Nested
   values in the `.pkl` files are dropped.
 
@@ -145,23 +127,35 @@ Read from `.env`; real environment variables win. The full list with comments is
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `DOC_MCP_URL` | push | bdc-doc-mcp base URL (default `http://127.0.0.1:8000`) |
+| `DOC_MCP_URL` | push | r-doc-mcp base URL (default `http://127.0.0.1:8000`) |
 | `INGEST_TOKEN` | push | Bearer token; must match the server's |
 | `PUSH_BATCH` | push | Chunks per upsert request (default 200) |
-| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_MODEL_PROVIDER` | push | Embedding endpoint. **Must match what bdc-doc-mcp queries with.** |
+| `PUSH_TIMEOUT` | push | Seconds allowed for one ingest API request (default 300) |
+| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_MODEL_PROVIDER` | push | Embedding endpoint. **Must match what r-doc-mcp queries with.** |
 | `EMBEDDING_BATCH_TOKENS` | push | Token budget per embedding request (default 6000) |
 | `COMPLETION_URL`, `COMPLETION_MODEL`, `COMPLETION_MODEL_PROVIDER`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `AZURE_API_VERSION` | `--build`, `--summarize` | Completion LLM for the contextualizer and summarizer |
 | `CONTEXT_CHAR_LIMIT` | `--build` | Truncation of the document context handed to the contextualizer (default 16000) |
-| `BDC_WEBSITE_DIR`, `BDC_GITBOOK_DIR` | `--build` | Source repo checkouts (default `../interim-bdc-website/`, `../bdc-gitbook/`) |
-| `PREPROC_DATA_DIR` | `--build` | Default for `--data-dir` (default `./data/`) |
+| `SUMMARY_MIN_CHARS` | `--summarize` | Texts shorter than this are embedded as-is instead of summarized (default 300) |
+| `COMPLETION_TEMPERATURE` | `--build`, `--summarize` | Sampling temperature of the contextualizer/summarizer LLM (default 0) |
+| `RETRIES` | `--build`, push | Attempts per LLM or embedding call before giving up (default 5) |
+| `REQUEST_TIMEOUT` | `--build` | Seconds allowed for one source download: web page, caption track (default 60) |
+| `USER_AGENT` | `--build` | User-Agent sent with web page, Freshdesk and transcript downloads (default `Mozilla/5.0`) |
+| `CONFIG_DIR` | `--build`, `--summarize` | Folder holding `sources.yaml`, `prompts.yaml` and `build.yaml` (default `config`; `examples/bdc` selects the BDC ones) |
+| `REPOS_DIR` | `--build` | Where git sources are cloned (default `./data/repos/`) |
+| `PREPROC_DATA_DIR` | `--build` | Default for `--data-dir` (default `./data/<config>/`, `<config>` = the `CONFIG_DIR` folder name, so examples don't overwrite each other) |
+
+Chunk size and overlap, the HTML tags to drop and to read, and the caption language are not
+environment variables: they shape the built corpus, so they live in `<CONFIG_DIR>/build.yaml`
+with the rest of the project's setup. Rebuild with `--reset` after changing them.
 
 ## Troubleshooting
 
 - **`POST .../ingest/upsert -> 401`**: `INGEST_TOKEN` differs between the two repos.
-- **`embedding call failed (ConnectionError); retrying`**: the Ollama tunnel dropped. The run
-  retries on its own; re-establish the port-forward if it keeps failing.
+- **`embedding call failed (ConnectionError); retrying`**: the embedding endpoint dropped
+  the connection. The run retries on its own; check the endpoint if it keeps failing.
 - **Dimension errors or nonsense results after switching embedding models**: vectors from
   different models don't mix. `--reset` and re-push with the new model, and change
   `EMBEDDING_*` on the server side too.
-- **`--build` fails on a missing directory**: the website or gitbook repo isn't cloned, or
-  the matching `BDC_*_DIR` variable points elsewhere.
+- **`--build` prints `warning: ...` lines**: those rows were skipped (bad link for the type,
+  missing path, no captions). Fix the row or ignore; the build only aborts when nothing was
+  built.

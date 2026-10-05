@@ -1,0 +1,21 @@
+# r-doc-builder prompt texts for the FastAPI documentation (CONFIG_DIR=examples/fastapi).
+# Same placeholders as the template prompts.yaml: {context}, {chunk_content}, {text}; literal braces as {{ }}.
+
+contextualize_chunk: |
+  The document below is part of the FastAPI documentation (fastapi.tiangolo.com), the Python web framework
+  for building APIs. Lines like {{* ../../docs_src/... *}} stand for code samples that are not shown.
+  <document>
+  {context}
+  </document>
+  Here is the chunk we want to situate within the whole document
+  <chunk>
+  {chunk_content}
+  </chunk>
+
+  Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
+
+summarize: |-
+  The text below is from the FastAPI documentation (the Python web framework).
+  Write a concise summary of the following text in 1-3 sentences, return the summary ONLY, This is NOT a conversation.
+
+  {text}

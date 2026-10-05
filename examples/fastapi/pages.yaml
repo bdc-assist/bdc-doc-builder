@@ -1,0 +1,27 @@
+# FastAPI's top-level pages (docs/en/docs/*.md), included from sources.yaml as doc_type page.
+# A git entry for docs/en/docs would recurse into every section, so each page is a url entry;
+# a raw .md URL is read as markdown.
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/index.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/features.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/python-types.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/async.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/virtual-environments.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/environment-variables.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/fastapi-cli.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/editor-support.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/project-generation.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/alternatives.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/history-design-future.md
+- source_type: url
+  link: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/docs/en/docs/benchmarks.md

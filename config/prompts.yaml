@@ -1,0 +1,22 @@
+# r-doc-builder prompt texts, loaded once by contextualize.py (<CONFIG_DIR>/prompts.yaml, default config/prompts.yaml).
+# Edit the wording freely, but keep the {placeholders} exactly as written — the code fills them in:
+#   contextualize_chunk: {context} = the whole document, {chunk_content} = the chunk being situated
+#     (both truncated to CONTEXT_CHAR_LIMIT). The answer is prepended to the chunk before embedding,
+#     so it must be the situating context only — no preamble, no repetition of the chunk.
+#   summarize: {text} = the text to summarize (truncated the same way). Used by ingest --summarize.
+
+contextualize_chunk: |
+  <document>
+  {context}
+  </document>
+  Here is the chunk we want to situate within the whole document
+  <chunk>
+  {chunk_content}
+  </chunk>
+
+  Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
+
+summarize: |-
+  Write a concise summary of the following text in 1-3 sentences, return the summary ONLY, This is NOT a conversation.
+
+  {text}

@@ -1,12 +1,14 @@
+import io
 import pickle
 import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # not installed: package sits at the repo root
 
-from bdc_doc_builder import ingest
-from bdc_doc_builder.ingest import _chunk_ids, _embed_batched, push_chunks
+from r_doc_builder import ingest
+from r_doc_builder.ingest import _chunk_ids, _embed_batched, push_chunks
 
 
 class FakeEmb:
@@ -32,6 +34,24 @@ class FlakyEmb:
         if self.calls <= self.fail_times:
             raise ConnectionError("tunnel dropped")
         return [[0.0] for _ in texts]
+
+
+def test_ingest_tunables_come_from_config():
+    import inspect
+
+    from r_doc_builder import config
+
+    assert inspect.signature(ingest._embed_with_retry).parameters["attempts"].default is config.RETRIES
+
+    kwargs = {}
+    resp = type("Resp", (), {"ok": True, "json": lambda self: {}})()
+    original = ingest.requests.post
+    ingest.requests.post = lambda url, **kw: kwargs.update(kw) or resp
+    try:
+        ingest._api_post("/ingest/upsert", [])
+    finally:
+        ingest.requests.post = original
+    assert kwargs["timeout"] is config.PUSH_TIMEOUT, "the ingest push uses the configured timeout"
 
 
 def test_batching_respects_token_budget():
@@ -67,6 +87,8 @@ def test_embed_batched_retries_transient_failure():
 
 
 def test_embed_batched_reraises_after_exhausting_retries():
+    from r_doc_builder import config
+
     original_sleep = ingest.time.sleep
     ingest.time.sleep = lambda seconds: None
     try:
@@ -76,7 +98,7 @@ def test_embed_batched_reraises_after_exhausting_retries():
             assert False, "expected the persistent failure to propagate"
         except ConnectionError:
             pass
-        assert emb.calls == 5, "should give up after the default attempt budget"
+        assert emb.calls == config.RETRIES, "should give up after the RETRIES budget"
     finally:
         ingest.time.sleep = original_sleep
 
@@ -111,7 +133,21 @@ def test_push_chunks_batches_requests():
     assert set(calls[0][1][0]) == {"id", "content", "embedding", "metadata"}, "ingest API contract"
 
 
-def test_ingest_paths_derives_doc_type_from_file_name():
+def test_iter_files_skips_git_clones():
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        (d / "repos" / "x").mkdir(parents=True)
+        (d / "repos" / "x" / "clone.md").write_text("# c", encoding="utf-8")
+        (d / "keep.md").write_text("# k", encoding="utf-8")
+        original_repos_dir = ingest.REPOS_DIR
+        ingest.REPOS_DIR = str(d / "repos")  # config.REPOS_DIR is read once at import; patch the module-level name directly
+        try:
+            assert [f.name for f in ingest.iter_files([d])] == ["keep.md"], "clones under REPOS_DIR are never pushed as ad-hoc files"
+        finally:
+            ingest.REPOS_DIR = original_repos_dir
+
+
+def test_ingest_paths_keeps_record_doc_type_unless_overridden():
     pushed = []
     originals = (ingest.get_emb, ingest._embed_batched, ingest.push_chunks)
     ingest.get_emb = lambda: FakeEmb()
@@ -119,23 +155,31 @@ def test_ingest_paths_derives_doc_type_from_file_name():
     ingest.push_chunks = lambda ids, contents, embeddings, metas, desc="": pushed.extend(metas)
     try:
         with tempfile.TemporaryDirectory() as d:
-            for name in ("events", "custom"):
-                with open(Path(d) / f"{name}.pkl", "wb") as f:
-                    pickle.dump([{"content": "c", "metadata": {}}], f)
+            with open(Path(d) / "faq.pkl", "wb") as f:
+                pickle.dump([{"content": "c", "metadata": {"doc_type": "faq"}}], f)
+            with open(Path(d) / "untyped.pkl", "wb") as f:
+                pickle.dump([{"content": "c", "metadata": {}}], f)
+            (Path(d) / "adhoc.md").write_text("---\ndate: 2025-01-15\n---\n# T\nbody", encoding="utf-8")
 
-            ingest.ingest_paths([d])
-            assert {m["source"]: m["doc_type"] for m in pushed} == {"events.pkl": "event", "custom.pkl": "docs"}, \
-                "known pipeline stems map to their doc_type, anything else falls back to docs"
+            with redirect_stderr(io.StringIO()):
+                ingest.ingest_paths([d])
+            by_source = {m["source"]: m.get("doc_type") for m in pushed}
+            assert by_source == {"faq.pkl": "faq", "untyped.pkl": None, str(Path(d) / "adhoc.md"): None}, \
+                "records keep the doc_type they carry; nothing is invented from file names"
+            adhoc = next(m for m in pushed if m["source"].endswith("adhoc.md"))
+            assert adhoc["hierarchy"] == "T", "ad-hoc files go through sources.load_file"
+            assert adhoc["date_num"] == 20250115, "ad-hoc files get date_num like pipeline records"
 
             pushed.clear()
-            ingest.ingest_paths([d], doc_type="faq")
-            assert {m["doc_type"] for m in pushed} == {"faq"}, "--doc-type overrides the file-name default"
+            with redirect_stderr(io.StringIO()):
+                ingest.ingest_paths([d], doc_type="docs")
+            assert {m["doc_type"] for m in pushed} == {"docs"}, "--doc-type overrides everything"
     finally:
         ingest.get_emb, ingest._embed_batched, ingest.push_chunks = originals
 
 
 def test_main_build_runs_pipeline_then_reset_then_push():
-    from bdc_doc_builder.preproc import pipeline
+    from r_doc_builder import pipeline
     calls = []
     originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
     pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or [Path("data/docs.pkl")]
@@ -159,13 +203,15 @@ def test_main_requires_paths_or_build():
 
 
 if __name__ == "__main__":
+    test_ingest_tunables_come_from_config()
     test_batching_respects_token_budget()
     test_oversized_single_text_is_truncated()
     test_embed_batched_retries_transient_failure()
     test_embed_batched_reraises_after_exhausting_retries()
     test_ids_are_stable_and_unique()
     test_push_chunks_batches_requests()
-    test_ingest_paths_derives_doc_type_from_file_name()
+    test_iter_files_skips_git_clones()
+    test_ingest_paths_keeps_record_doc_type_unless_overridden()
     test_main_build_runs_pipeline_then_reset_then_push()
     test_main_requires_paths_or_build()
     print("ingest self-check passed")
