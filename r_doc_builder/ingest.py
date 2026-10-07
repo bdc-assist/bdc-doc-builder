@@ -111,6 +111,8 @@ def _embed_batched(emb, texts, desc="embedding"):
         if batch:
             vectors.extend(_embed_with_retry(emb, batch))
             pbar.update(len(batch))
+    if len(vectors) != len(texts):  # push_chunks zips them: a short reply would drop chunks silently
+        raise RuntimeError(f"embedding returned {len(vectors)} vectors for {len(texts)} texts")
     return vectors
 
 

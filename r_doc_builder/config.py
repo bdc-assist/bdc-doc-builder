@@ -30,6 +30,9 @@ REPOS_DIR = os.getenv("REPOS_DIR", "./data/repos/")  # where git sources are clo
 PREPROC_DATA_DIR = os.getenv("PREPROC_DATA_DIR") or f"./data/{Path(CONFIG_DIR).resolve().name}/"
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0")  # sent with page, freshdesk and transcript downloads
 COMPLETION_TEMPERATURE = float(os.getenv("COMPLETION_TEMPERATURE", "0"))  # every get_llm() provider
+# unset for non-reasoning models (gpt-4o, gpt-4o-mini); none|low|medium|high for reasoning ones
+# (gpt-6-luna). See _openai_kwargs. OpenAI-family providers only.
+COMPLETION_REASONING_EFFORT = os.getenv("COMPLETION_REASONING_EFFORT") or None
 RETRIES = int(os.getenv("RETRIES", "5"))  # attempts per LLM / embedding call before giving up
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))  # one source download (sources.py)
 SUMMARY_MIN_CHARS = int(os.getenv("SUMMARY_MIN_CHARS", "300"))  # ingest --summarize: shorter texts are embedded as-is
@@ -86,32 +89,48 @@ def get_emb():
     raise ValueError(f"Unsupported EMBEDDING_MODEL_PROVIDER: {provider}")
 
 
+def _openai_kwargs() -> dict:
+    """Temperature and reasoning for the OpenAI-family clients, by COMPLETION_REASONING_EFFORT.
+    Each rule is what the API returned for that model (tests/test_contextualize.py):
+      unset   temperature only: gpt-4o-mini rejects any reasoning_effort, even "none"
+      none    reasoning off: gpt-6-luna then takes COMPLETION_TEMPERATURE
+      other   no temperature: a reasoning gpt-6-luna takes only its default. Contextualizing makes
+              plain calls, which chat completions serves while reasoning (r-assist's tool calls need
+              the Responses API; not here, so replies stay plain strings)."""
+    if not COMPLETION_REASONING_EFFORT:
+        return {"temperature": COMPLETION_TEMPERATURE}
+    if COMPLETION_REASONING_EFFORT == "none":
+        return {"temperature": COMPLETION_TEMPERATURE, "reasoning_effort": "none"}
+    return {"reasoning_effort": COMPLETION_REASONING_EFFORT}
+
+
 @lru_cache
 def get_llm():
     provider = _provider("COMPLETION")
     url = os.getenv("COMPLETION_URL")
     model = os.getenv("COMPLETION_MODEL")
-    print(f"llm: provider={provider} model={model} url={url}", file=sys.stderr)
+    print(f"llm: provider={provider} model={model} url={url} reasoning_effort={COMPLETION_REASONING_EFFORT}",
+          file=sys.stderr)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model or "gpt-4o-mini", temperature=COMPLETION_TEMPERATURE)
+        return ChatOpenAI(model=model or "gpt-4o-mini", **_openai_kwargs())
     if provider == "azure" and url and url.rstrip("/").endswith("/openai/v1"):
         # Azure's OpenAI-compatible v1 gateway speaks plain OpenAI — the deployments
         # client would stack its own path on top and 404
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(base_url=url, model=model, temperature=COMPLETION_TEMPERATURE)
+        return ChatOpenAI(base_url=url, model=model, **_openai_kwargs())
     if provider == "azure":
         # COMPLETION_MODEL is the *deployment* name here, and COMPLETION_URL the resource root
         # (no /openai/v1 suffix) — the client appends the deployment path itself
         from langchain_openai import AzureChatOpenAI
         return AzureChatOpenAI(
-            azure_endpoint=url, azure_deployment=model, temperature=COMPLETION_TEMPERATURE,
+            azure_endpoint=url, azure_deployment=model, **_openai_kwargs(),
             api_version=os.getenv("AZURE_API_VERSION", "2024-10-21"),
             api_key=os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"),
         )
     if provider == "vllm":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(base_url=url, model=model, temperature=COMPLETION_TEMPERATURE, api_key=_self_hosted_key())
+        return ChatOpenAI(base_url=url, model=model, **_openai_kwargs(), api_key=_self_hosted_key())
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(base_url=url, model=model, temperature=COMPLETION_TEMPERATURE)

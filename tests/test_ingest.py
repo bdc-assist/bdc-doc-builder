@@ -133,6 +133,36 @@ def test_push_chunks_batches_requests():
     assert set(calls[0][1][0]) == {"id", "content", "embedding", "metadata"}, "ingest API contract"
 
 
+def test_ingest_api_errors_stop_the_push():
+    """A non-2xx from r-doc-mcp (bad token, server down, wrong-size embeddings) must raise, never
+    pass for a push or a --reset that did not happen."""
+    resp = type("Resp", (), {"ok": False, "status_code": 500, "text": "boom"})()
+    original = ingest.requests.post
+    ingest.requests.post = lambda url, **kw: resp
+    try:
+        for call in (lambda: ingest.push_chunks(["1"], ["c"], [[0.0]], [{}]), ingest.reset_remote):
+            try:
+                call()
+                raise AssertionError("an ingest API error must raise")
+            except RuntimeError as e:
+                assert "500" in str(e) and "boom" in str(e), e
+    finally:
+        ingest.requests.post = original
+
+
+def test_embed_batched_rejects_missing_vectors():
+    """An embedder returning fewer vectors than texts used to be zipped away: chunks silently
+    missing from the push. Stop before pushing instead."""
+    class ShortEmb:
+        def embed_documents(self, texts):
+            return [[0.0] for _ in texts[1:]]
+    try:
+        ingest._embed_batched(ShortEmb(), ["a", "b", "c"])
+        raise AssertionError("missing embeddings must raise")
+    except RuntimeError as e:
+        assert "2 vectors for 3 texts" in str(e), e
+
+
 def test_iter_files_skips_git_clones():
     with tempfile.TemporaryDirectory() as d:
         d = Path(d)
@@ -210,6 +240,8 @@ if __name__ == "__main__":
     test_embed_batched_reraises_after_exhausting_retries()
     test_ids_are_stable_and_unique()
     test_push_chunks_batches_requests()
+    test_ingest_api_errors_stop_the_push()
+    test_embed_batched_rejects_missing_vectors()
     test_iter_files_skips_git_clones()
     test_ingest_paths_keeps_record_doc_type_unless_overridden()
     test_main_build_runs_pipeline_then_reset_then_push()

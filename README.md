@@ -46,7 +46,7 @@ relative links resolve against the file's own folder.
 | `git` | repo URL, optional `#subdir` | shallow-cloned into `data/repos/` (with `core.longpaths`, so deep trees work on Windows); `--pull` updates it; GitHub files get a `page_url` |
 | `youtube` | video, playlist or channel URL | captions via yt-dlp, chunked into timestamped windows |
 | `freshdesk` | help-center category or folder URL (`…/support/solutions/<id>`, `…/support/solutions/folders/<id>`) | public Freshdesk portal scrape, no API key; one document per article with `title`, `category`, `folder` metadata |
-| `transcripts` | 2-column CSV (`video_url,transcript`): a local `.csv`, a CSV URL, or a Google Sheet URL (converted to its CSV export) | one document per YouTube video from its SRT transcript (a Drive link, URL or path next to the CSV); chunked like `youtube`, title/date from YouTube |
+| `transcripts` | YAML list of `{video_url, transcript}`: a local `.yaml` or a YAML URL | one document per YouTube video from its SRT transcript (a Drive link, URL or path next to the list); chunked like `youtube`, title/date from YouTube |
 
 `doc_type` is the label r-doc-mcp filters on (declare the types in its `config/doc_types.yaml`).
 Omitted, blank or `none` inherits from the including `yaml` entry; entries that never get one are
@@ -56,7 +56,7 @@ is warned and skipped; the build only fails when nothing at all was built.
 `examples/bdc/sources.yaml` lists the NHLBI BioData Catalyst sources: the GitBook content repo
 (`docs`) and the website repo's pages, news, events and fellows folders (`page`, `update`, `event`,
 `fellow`), the Freshdesk FAQ category (`faq`), and the video transcripts sheet reduced to
-`examples/bdc/videos.csv` (`video`). Every original BDC source now has a generic source type. The
+`examples/bdc/videos.yaml` (`video`). Every original BDC source now has a generic source type. The
 example ingests every markdown file of those folders; the original builder skipped GitBook's
 `SUMMARY.md` and a few oversized pages, which the list cannot express.
 

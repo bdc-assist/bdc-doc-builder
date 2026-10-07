@@ -1,5 +1,5 @@
 # NHLBI BioData Catalyst sources. doc_type values are the ones r-doc-mcp's examples/bdc/doc_types.yaml
-# declares. Every original BDC source has a generic type; videos.csv is the BDC video sheet reduced to two columns.
+# declares. Every original BDC source has a generic type; videos.yaml is the BDC video sheet reduced to two fields.
 - source_type: git
   doc_type: docs
   link: https://github.com/stagecc/bdc-gitbook   # the GitBook content repo; bdc-web's docs app syncs from it
@@ -20,4 +20,4 @@
   link: https://bdcatalyst.freshdesk.com/support/solutions/60000157358   # BDC FAQs (the Fellows Program FAQ category is gone)
 - source_type: transcripts
   doc_type: video
-  link: videos.csv   # 2 columns: YouTube URL, SRT transcript (Drive links); a 2-column Google Sheet URL works too
+  link: videos.yaml   # video_url: YouTube URL, transcript: SRT (Drive links)

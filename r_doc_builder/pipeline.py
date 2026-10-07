@@ -108,6 +108,9 @@ def build(args) -> list[Path]:
         except Exception as e:
             warn(f"{where}: {type(e).__name__}: {e}")
             continue
+        if not docs:  # wrong git subdir, JS-only page, scanned PDF: as lost as a row that fails
+            warn(f"{where}: {source_type} {link} -> 0 documents")
+            continue
         tqdm.write(f"{where}: {source_type} {link} -> {len(docs)} documents", file=sys.stderr)
         for doc in tqdm(docs, desc=f"{key} <- {link[-40:]}", unit="doc", leave=False):
             groups[key].extend(to_records(doc, doc_type, not args.no_contextualize))

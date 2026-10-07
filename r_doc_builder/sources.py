@@ -5,13 +5,12 @@ A document is {"text": whole document text,
                "chunks": [{"content": str, ...extra metadata for that chunk}],
                "metadata": {"source", "page_url", "title"?, "date"? ("YYYY-MM-DD")}}.
 """
-import csv
 import json
 import re
 import shutil
 import subprocess
 import sys
-from io import BytesIO, StringIO
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -34,6 +33,22 @@ _JSX_TAGS = re.compile(r"</?[A-Z][^>]*>")
 _MD_IMAGES = re.compile(r"!\[.*?\]\[.*?\]|!\[.*?\]\(.*?\)")
 _MD_REFLINKS = re.compile(r"^\[.*?\]:\s*.*$", re.M)
 _HEADER = re.compile(r"^(#{1,6})\s+(.+)$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCED_BLOCK = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?^ {0,3}\1", re.M | re.S)
+
+
+def _strip_mdx(text):
+    """MDX imports/JSX, images and reference links, outside fenced code only: in a fence
+    `import os`, `export PATH=...` and List<T> are code."""
+    def strip(s):
+        for pattern in (_MDX_IMPORTS, _JSX_TAGS, _MD_IMAGES, _MD_REFLINKS):
+            s = pattern.sub("", s)
+        return s
+    out, pos = [], 0
+    for m in _FENCED_BLOCK.finditer(text):
+        out += [strip(text[pos:m.start()]), m.group(0)]
+        pos = m.end()
+    return "".join(out + [strip(text[pos:])])
 
 
 def warn(msg):
@@ -45,12 +60,10 @@ def warn(msg):
 def chunk_markdown(text):
     """One chunk per header section, 'hierarchy' = the header path; a section longer than
     CHUNK_SIZE is split further, every piece keeping its hierarchy.
-    Returns (cleaned text, chunks); MDX imports/JSX, images and reference links are stripped."""
-    text = _MDX_IMPORTS.sub("", text)
-    text = _JSX_TAGS.sub("", text)
-    text = _MD_IMAGES.sub("", text)
-    text = _MD_REFLINKS.sub("", text)
-    chunks, current, headers = [], [], []
+    Returns (cleaned text, chunks); MDX imports/JSX, images and reference links are stripped
+    outside fenced code, and a "# comment" inside a fence is not a header."""
+    text = _strip_mdx(text)
+    chunks, current, headers, in_fence = [], [], [], False
 
     def flush():  # closure: reads the *current* bindings of current/headers when called
         body = "\n".join(current).strip()
@@ -59,7 +72,8 @@ def chunk_markdown(text):
             chunks.extend({"content": p, "hierarchy": ", ".join(headers)} for p in pieces)
 
     for line in text.split("\n"):
-        m = _HEADER.match(line)
+        in_fence ^= bool(_FENCE.match(line))
+        m = not in_fence and _HEADER.match(line)
         if m:
             flush()
             current = []
@@ -330,20 +344,9 @@ def load_youtube(link):
 
 # --- transcripts ---
 
-_GSHEET = re.compile(r"docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]+)")
 _GDRIVE = re.compile(r"drive\.google\.com/(?:file/d/|open\?id=|uc\?(?:export=download&)?id=)([A-Za-z0-9_-]+)")
 _YT_ID = re.compile(r"(?:[?&]v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})")
 _SRT_TIME = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{3})\s*-->")
-
-
-def sheet_csv_url(link):
-    """A Google Sheet URL -> its CSV export (the gid is kept when present); anything else unchanged."""
-    m = _GSHEET.search(link)
-    if not m:
-        return link
-    gid = re.search(r"[?#&]gid=(\d+)", link)
-    return (f"https://docs.google.com/spreadsheets/d/{m.group(1)}/gviz/tq?tqx=out:csv"
-            + (f"&gid={gid.group(1)}" if gid else ""))
 
 
 def _fetch_text(url):
@@ -373,47 +376,52 @@ def _srt_or_raise(text, ref):
     return text
 
 
-def read_transcript(ref, csv_dir):
-    """A transcript cell -> SRT text: a Google Drive share link, any http(s) URL, or a path relative
-    to the CSV's folder (local CSVs only)."""
+def read_transcript(ref, list_dir):
+    """A transcript entry -> SRT text: a Google Drive share link, any http(s) URL, or a path relative
+    to the list's folder (local lists only)."""
     m = _GDRIVE.search(ref)
     if m:
         return _srt_or_raise(_fetch_text(f"https://drive.google.com/uc?export=download&id={m.group(1)}"), ref)
     if ref.startswith(("http://", "https://")):
         return _srt_or_raise(_fetch_text(ref), ref)
-    if csv_dir is None:
-        raise ValueError(f"relative transcript path needs a local CSV: {ref}")
-    return Path(csv_dir, ref).read_text(encoding="utf-8-sig")
+    if list_dir is None:
+        raise ValueError(f"relative transcript path needs a local list: {ref}")
+    return Path(list_dir, ref).read_text(encoding="utf-8-sig")
 
 
 def load_transcripts(link):
-    """A 2-column CSV (video_url, transcript) — a local .csv, a CSV URL or a Google Sheet URL -> one
-    document per YouTube video, chunked like the youtube source; title/date from YouTube when reachable."""
+    """A YAML list of {video_url, transcript} — a local .yaml or a YAML URL -> one document per YouTube
+    video, chunked like the youtube source; title/date from YouTube when reachable."""
     if link.startswith(("http://", "https://")):
-        text, csv_dir = _fetch_text(sheet_csv_url(link)), None
+        text, list_dir = _fetch_text(link), None
     else:
-        text, csv_dir = Path(link).read_text(encoding="utf-8-sig"), Path(link).parent
+        text, list_dir = Path(link).read_text(encoding="utf-8-sig"), Path(link).parent
+    entries = yaml.safe_load(text) or []
+    if not isinstance(entries, list):
+        raise ValueError(f"expected a list of {{video_url, transcript}} entries, got {type(entries).__name__}")
     docs = []
-    for n, cells in enumerate(csv.reader(StringIO(text)), start=1):
-        cells = [c.strip() for c in cells] + ["", ""]
-        video_url, ref = cells[0], cells[1]
-        if not video_url.startswith(("http://", "https://")):
-            continue  # header, comment or blank row
+    for n, entry in enumerate(entries, start=1):
+        where = f"{link}[{n}]"
+        if not isinstance(entry, dict):
+            warn(f"{where}: expected a mapping with video_url, transcript")
+            continue
+        video_url = str(entry.get("video_url") or "").strip()
+        ref = str(entry.get("transcript") or "").strip()
         vid = _YT_ID.search(video_url) if is_youtube(video_url) else None
         if not vid:
-            warn(f"{link}:{n}: not a YouTube video URL: {video_url}")
+            warn(f"{where}: not a YouTube video URL: {video_url}")
             continue
         if not ref:
-            warn(f"{link}:{n}: no transcript for {video_url}")
+            warn(f"{where}: no transcript for {video_url}")
             continue
         try:
-            cues = parse_srt(read_transcript(ref, csv_dir))
+            cues = parse_srt(read_transcript(ref, list_dir))
         except Exception as e:
-            warn(f"{link}:{n}: {type(e).__name__}: {e}")
+            warn(f"{where}: {type(e).__name__}: {e}")
             continue
         chunks = chunk_transcript(cues, vid.group(1))
         if not chunks:
-            warn(f"{link}:{n}: empty transcript: {ref}")
+            warn(f"{where}: empty transcript: {ref}")
             continue
         page_url = f"https://www.youtube.com/watch?v={vid.group(1)}"
         meta = {"source": page_url, "page_url": page_url}
@@ -521,8 +529,8 @@ def load_row(source_type, link, pull=False):
             raise ValueError(f"not a YouTube URL: {link}")
         return load_youtube(link)
     if source_type == "transcripts":
-        if not (is_url or (link.lower().endswith(".csv") and Path(link).is_file())):
-            raise ValueError(f"not a CSV file, CSV URL or Google Sheet URL: {link}")
+        if not (is_url or (link.lower().endswith((".yaml", ".yml")) and Path(link).is_file())):
+            raise ValueError(f"not a .yaml file or YAML URL: {link}")
         return load_transcripts(link)
     if source_type == "freshdesk":
         if not is_freshdesk(link):

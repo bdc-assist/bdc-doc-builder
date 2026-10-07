@@ -54,10 +54,7 @@ def test_tunables_come_from_config():
 
     from r_doc_builder import config
 
-    llm_source = inspect.getsource(config.get_llm)
-    assert "temperature=0" not in llm_source, "no literal temperature left in get_llm"
-    assert llm_source.count("temperature=COMPLETION_TEMPERATURE") == 5, "every provider branch"
-
+    # which client get_llm builds and that the temperature reaches it: tests/test_contextualize.py
     assert inspect.signature(contextualize._invoke_llm).parameters["attempts"].default is config.RETRIES
 
     assert sources.HTML_DROP_TAGS is config.HTML_DROP_TAGS
@@ -394,7 +391,7 @@ def test_load_row_rejects_mismatched_links():
                               ("freshdesk", "https://help.example.com/about"),
                               ("freshdesk", "https://help.example.com/support/solutions/articles/11-what"),
                               ("freshdesk", "https://help.example.com/support/solutions"),
-                              ("transcripts", "no-such.csv")]:
+                              ("transcripts", "no-such.yaml")]:
         try:
             sources.load_row(source_type, link)
             assert False, f"{source_type} {link} should be rejected"
@@ -510,22 +507,20 @@ def test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows():
             assert e.code != 0
 
 
-def test_load_transcripts_reads_two_column_csv_and_sheet():
+def test_load_transcripts_reads_yaml_list():
     srt = ("1\n00:00:01,000 --> 00:00:03,000\nHello there\n\n"
            "2\n00:00:04,500 --> 00:00:06,000\nsecond cue\nstill second\n\n"
            "3\n00:00:07,000 --> 00:00:08,000\n\n")
-    sheet = "https://docs.google.com/spreadsheets/d/SHEET_ID/edit?gid=42#gid=42"
-    assert sources.sheet_csv_url(sheet) == "https://docs.google.com/spreadsheets/d/SHEET_ID/gviz/tq?tqx=out:csv&gid=42"
-    assert sources.sheet_csv_url("https://docs.google.com/spreadsheets/d/SHEET_ID/edit") == "https://docs.google.com/spreadsheets/d/SHEET_ID/gviz/tq?tqx=out:csv"
-    assert sources.sheet_csv_url("https://x/y.csv") == "https://x/y.csv"
-    csv_text = ("video_url,transcript\n"
-                "https://www.youtube.com/watch?v=abcdefghijk,https://drive.google.com/file/d/FILE1/view?usp=drive_link\n"
-                "https://youtu.be/lmnopqrstuv,https://ex.org/t.srt\n"
-                "https://vimeo.com/1,https://ex.org/t.srt\n"
-                "https://www.youtube.com/watch?v=abcdefghijk,\n"
-                "https://www.youtube.com/watch?v=zzzzzzzzzzz,https://ex.org/missing.srt\n"
-                "https://www.youtube.com/watch?v=yyyyyyyyyyy,https://ex.org/login.srt\n")
-    pages = {"https://docs.google.com/spreadsheets/d/SHEET_ID/gviz/tq?tqx=out:csv&gid=42": FakeResp(content=csv_text.encode()),
+    list_url = "https://ex.org/videos.yaml"
+    yaml_text = ("- video_url: https://www.youtube.com/watch?v=abcdefghijk\n"
+                 "  transcript: https://drive.google.com/file/d/FILE1/view?usp=drive_link\n"
+                 "- video_url: https://youtu.be/lmnopqrstuv\n  transcript: https://ex.org/t.srt\n"
+                 "- video_url: https://vimeo.com/1\n  transcript: https://ex.org/t.srt\n"
+                 "- video_url: https://www.youtube.com/watch?v=abcdefghijk\n"
+                 "- video_url: https://www.youtube.com/watch?v=zzzzzzzzzzz\n  transcript: https://ex.org/missing.srt\n"
+                 "- video_url: https://www.youtube.com/watch?v=yyyyyyyyyyy\n  transcript: https://ex.org/login.srt\n"
+                 "- not a mapping\n")
+    pages = {list_url: FakeResp(content=yaml_text.encode()),
              "https://drive.google.com/uc?export=download&id=FILE1": FakeResp(content=srt.encode()),
              "https://ex.org/t.srt": FakeResp(content=srt.encode()),
              "https://ex.org/missing.srt": FakeResp(status=404),
@@ -541,7 +536,7 @@ def test_load_transcripts_reads_two_column_csv_and_sheet():
     err = io.StringIO()
     try:
         with redirect_stderr(err):
-            docs = sources.load_row("transcripts", sheet)
+            docs = sources.load_row("transcripts", list_url)
     finally:
         sources._ytdl, sources.requests.get = original
     assert [d["metadata"] for d in docs] == [
@@ -551,23 +546,40 @@ def test_load_transcripts_reads_two_column_csv_and_sheet():
     assert docs[0]["chunks"] == [{"content": "Hello there second cue still second", "start_seconds": 1.0,
                                   "timestamp_url": "https://youtu.be/abcdefghijk?t=1"}]
     assert docs[0]["text"] == "Hello there second cue still second"
-    assert err.getvalue().count("warning:") == 5, err.getvalue()  # vimeo row, empty transcript cell, 404 srt, no title/date for video 2, HTML page instead of srt
+    assert err.getvalue().count("warning:") == 6, err.getvalue()  # vimeo entry, no transcript, 404 srt, no title/date for video 2, HTML page instead of srt, non-mapping entry
     assert "HTML page instead of a transcript" in err.getvalue()
 
     def no_net(url, **kw):
-        raise AssertionError("a local CSV with a relative SRT path must not touch the network")
+        raise AssertionError("a local list with a relative SRT path must not touch the network")
 
     with tempfile.TemporaryDirectory() as d:
         _write(Path(d) / "v.srt", srt)
-        _write(Path(d) / "videos.csv", "# comment\nhttps://www.youtube.com/watch?v=abcdefghijk,v.srt\n")
+        _write(Path(d) / "videos.yaml", "# comment\n- video_url: https://www.youtube.com/watch?v=abcdefghijk\n  transcript: v.srt\n")
         original = (sources._ytdl, sources.requests.get)
         sources._ytdl, sources.requests.get = fake_ytdl, no_net
         try:
             with redirect_stderr(io.StringIO()):
-                (doc,) = sources.load_row("transcripts", str(Path(d) / "videos.csv"))
+                (doc,) = sources.load_row("transcripts", str(Path(d) / "videos.yaml"))
         finally:
             sources._ytdl, sources.requests.get = original
         assert doc["metadata"]["title"] == "Vid" and doc["chunks"][0]["start_seconds"] == 1.0
+
+
+def test_build_warns_on_a_source_with_no_documents():
+    """A row that loads nothing (wrong git subdir, JS-only page, scanned PDF) is warned like a row
+    that fails; it used to pass with only a progress line while the build carried on without it."""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d); (d / "docs").mkdir(); (d / "empty").mkdir()
+        _write(d / "docs" / "a.md", "# A\nay")
+        _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: docs}\n"
+                                   "- {source_type: path, doc_type: docs, link: empty}\n")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
+        assert [p.name for p in paths] == ["docs.pkl"], "the other rows still build"
+        # tqdm's bar control codes can precede it on the line
+        warnings = [line.split("warning:", 1)[1] for line in err.getvalue().splitlines() if "warning:" in line]
+        assert len(warnings) == 1 and "empty" in warnings[0] and "0 documents" in warnings[0], warnings
 
 
 if __name__ == "__main__":
@@ -591,11 +603,12 @@ if __name__ == "__main__":
     test_chunk_transcript_windows_at_cue_boundaries()
     test_parse_json3()
     test_load_youtube_expands_playlist_and_builds_docs()
-    test_load_transcripts_reads_two_column_csv_and_sheet()
+    test_load_transcripts_reads_yaml_list()
     test_load_freshdesk_walks_category_folders_and_articles()
     test_load_row_rejects_mismatched_links()
     test_read_rows_comments_relative_paths_and_inheritance()
     test_read_rows_warns_and_skips_bad_entries()
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
+    test_build_warns_on_a_source_with_no_documents()
     print("pipeline self-check passed")

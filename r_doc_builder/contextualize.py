@@ -22,6 +22,14 @@ def _invoke_llm(prompt, attempts=RETRIES):
         try:
             return get_llm().invoke(prompt).content.strip()
         except Exception as e:
+            # a 400 is the request itself (e.g. gpt-6-luna with reasoning on rejects temperature 0):
+            # every chunk would fail the same way, so stop instead of retrying and silently embedding
+            # raw text. A content-filter 400 is about this chunk only: raw text, no retries.
+            if getattr(e, "status_code", None) == 400:
+                if "content_filter" not in str(e):
+                    raise
+                print("  LLM call blocked by the content filter; using raw text")
+                return None
             if attempt == attempts - 1:
                 print(f"  LLM call failed after {attempts} tries ({type(e).__name__}); using raw text")
                 return None
