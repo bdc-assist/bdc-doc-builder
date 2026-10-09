@@ -106,4 +106,5 @@ and environment variable is in [docs/cli.md](docs/cli.md).
 ```bash
 uv run python tests/test_ingest.py     # batching, chunk ids, push batching — no network
 uv run python tests/test_pipeline.py   # yaml walk, chunkers, source types (stubbed) — no network
+uv run python tests/test_e2e.py        # incremental pushes vs a fresh push, real r-doc-mcp from ../bdc-doc-mcp — no network, ~2 min
 ```
