@@ -108,6 +108,12 @@ from another. The options are the same ones `ingest --build` passes through.
 | `--pull` | `git pull --ff-only` existing clones of git sources. Without it, clones are reused as they are; missing clones are always cloned. |
 | `--data-dir D` | Where the `.pkl` files are written. Default `./data/<config>/`, the `CONFIG_DIR` folder name (`PREPROC_DATA_DIR`). |
 
+Contextualizing reuses the previous build: a chunk whose text and document are unchanged since
+the last build into the same `--data-dir` keeps its context sentence (any doc_type's `.pkl`
+counts), so only new or edited documents call the LLM — and unchanged chunks keep the same
+embedded text, so the push skips them. Changing the `contextualize_chunk` prompt or
+`COMPLETION_MODEL` re-contextualizes everything; so does building into an empty `--data-dir`.
+
 Source types and the yaml format are described in the README.
 
 It prints the `ingest` command for what it wrote. Preprocess one doc_type and push it:

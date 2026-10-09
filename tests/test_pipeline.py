@@ -460,10 +460,11 @@ def test_to_records_merges_metadata_and_contextualizes():
     finally:
         pipeline.contextualize_chunk = original
     assert recs[0] == {"content": "c1", "metadata": {"source": "s", "page_url": "u", "date": "2025-01-15", "date_num": 20250115,
-                                                     "doc_type": "docs", "hierarchy": "H", "contextualized_chunk": "ctx(whole) c1"}}
+                                                     "doc_type": "docs", "hierarchy": "H", "contextualized_chunk": "ctx(whole) c1",
+                                                     "context_hash": contextualize.context_hash("whole")}}
     assert "hierarchy" not in recs[1]["metadata"]
     untyped = pipeline.to_records(doc, None, contextualize=False)
-    assert "doc_type" not in untyped[0]["metadata"] and "contextualized_chunk" not in untyped[0]["metadata"]
+    assert "doc_type" not in untyped[0]["metadata"] and "contextualized_chunk" not in untyped[0]["metadata"] and "context_hash" not in untyped[0]["metadata"]
 
 
 def _args(**kw):
@@ -582,6 +583,92 @@ def test_build_warns_on_a_source_with_no_documents():
         assert len(warnings) == 1 and "empty" in warnings[0] and "0 documents" in warnings[0], warnings
 
 
+def _contexts(*paths):
+    found = {}
+    for path in paths:
+        with open(path, "rb") as f:
+            found.update({r["content"]: r["metadata"]["contextualized_chunk"] for r in pickle.load(f)})
+    return found
+
+
+def test_build_reuses_context_of_unchanged_documents():
+    """A rebuild calls the LLM only for documents whose text changed and keeps the exact sentence
+    for the rest, so ingest's embed_hash matches and nothing unchanged is re-embedded. The fake LLM
+    never answers the same way twice, like a real one."""
+    calls = []
+    original = pipeline.contextualize_chunk
+    pipeline.contextualize_chunk = lambda chunk, whole: calls.append(chunk) or f"ctx{len(calls)} {chunk}"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            _write(d / "a.md", "# A\nay\n## A2\nay two")
+            _write(d / "b.md", "# B\nbee")
+            _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: a.md}\n"
+                                       "- {source_type: path, doc_type: faq, link: b.md}\n")
+            args = _args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"))
+            out = (d / "out" / "docs.pkl", d / "out" / "faq.pkl")
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert len(calls) == 3
+            first = _contexts(*out)
+
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert calls == [] and _contexts(*out) == first, "nothing changed: no LLM call, the same sentences"
+
+            _write(d / "a.md", "# A\nay\n## A2\nay two, edited")
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert sorted(calls) == ["ay", "ay two, edited"], "an edited document is re-situated whole; b.md is not"
+
+            _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: a.md}\n"
+                                       "- {source_type: path, doc_type: docs, link: b.md}\n")
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert calls == [], "a source moved to another doc_type keeps its context"
+    finally:
+        pipeline.contextualize_chunk = original
+
+
+def test_context_reuse_misses_when_prompt_or_model_changes():
+    doc = {"text": "whole", "chunks": [{"content": "c1"}], "metadata": {"source": "s", "page_url": "u"}}
+    previous = {("s", "u", "c1", contextualize.context_hash("whole")): "old ctx c1"}
+    original, prompt = pipeline.contextualize_chunk, contextualize.PROMPTS["contextualize_chunk"]
+    saved_model = os.environ.get("COMPLETION_MODEL")
+    pipeline.contextualize_chunk = lambda chunk, whole: f"new ctx {chunk}"
+
+    def context():
+        with redirect_stderr(io.StringIO()):
+            return pipeline.to_records(doc, None, True, previous)[0]["metadata"]["contextualized_chunk"]
+
+    try:
+        assert context() == "old ctx c1"
+        assert contextualize.context_hash("whole") != contextualize.context_hash("whole, edited")
+        contextualize.PROMPTS["contextualize_chunk"] = prompt + " Be brief."
+        assert context() == "new ctx c1", "a new prompt re-situates every chunk"
+        contextualize.PROMPTS["contextualize_chunk"] = prompt
+        os.environ["COMPLETION_MODEL"] = "another-model"
+        assert context() == "new ctx c1", "so does another completion model"
+    finally:
+        pipeline.contextualize_chunk, contextualize.PROMPTS["contextualize_chunk"] = original, prompt
+        if saved_model is None:
+            os.environ.pop("COMPLETION_MODEL", None)
+        else:
+            os.environ["COMPLETION_MODEL"] = saved_model
+
+
+def test_unreadable_previous_pkl_is_warned_and_ignored():
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "docs.pkl").write_bytes(b"not a pickle")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            assert pipeline.previous_contexts(d) == {}
+        assert "warning:" in err.getvalue() and "docs.pkl" in err.getvalue(), err.getvalue()
+
+
 if __name__ == "__main__":
     test_chunk_settings_come_from_config()
     test_data_dir_follows_config_dir()
@@ -611,4 +698,7 @@ if __name__ == "__main__":
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
     test_build_warns_on_a_source_with_no_documents()
+    test_build_reuses_context_of_unchanged_documents()
+    test_context_reuse_misses_when_prompt_or_model_changes()
+    test_unreadable_previous_pkl_is_warned_and_ignored()
     print("pipeline self-check passed")

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from . import sources
 from .config import PREPROC_DATA_DIR, SOURCES_FILE
-from .contextualize import contextualize_chunk
+from .contextualize import context_hash, contextualize_chunk
 from .sources import warn
 
 UNTYPED = "untyped"
@@ -64,18 +64,41 @@ def read_rows(path, inherited=None, _seen=None):
     return rows
 
 
-def to_records(doc, doc_type, contextualize):
-    """One chunked document -> ingest records {content, metadata} (the .pkl shape)."""
+def previous_contexts(out_dir):
+    """{(source, page_url, chunk content, context_hash): contextualized_chunk} from the .pkl files a
+    previous build left in out_dir. Every doc_type's, so a source moved to another doc_type keeps
+    its sentences. Reusing them skips the LLM call and keeps the embedded text identical, so
+    ingest skips re-embedding those chunks too."""
+    found = {}
+    for path in sorted(Path(out_dir).glob("*.pkl")):
+        try:
+            with open(path, "rb") as f:
+                for row in pickle.load(f):
+                    meta = row["metadata"]
+                    if meta.get("contextualized_chunk") and meta.get("context_hash"):
+                        key = (meta.get("source"), meta.get("page_url"), row["content"], meta["context_hash"])
+                        found[key] = meta["contextualized_chunk"]
+        except Exception as e:
+            warn(f"{path}: unreadable, its contexts are not reused ({type(e).__name__}: {e})")
+    return found
+
+
+def to_records(doc, doc_type, contextualize, previous=None):
+    """One chunked document -> ingest records {content, metadata} (the .pkl shape). previous
+    (see previous_contexts) supplies context sentences to reuse instead of calling the LLM."""
     base = dict(doc["metadata"])
     if doc_type:
         base["doc_type"] = doc_type
     if base.get("date"):
         base["date_num"] = int(base["date"].replace("-", ""))  # chroma range filters are numeric-only
+    if contextualize:
+        base["context_hash"] = context_hash(doc["text"])
     records = []
     for chunk in tqdm(doc["chunks"], desc=f"contextualizing {base['source'][-40:]}", leave=False, disable=not contextualize):
         meta = {**base, **{k: v for k, v in chunk.items() if k != "content"}}
         if contextualize:
-            meta["contextualized_chunk"] = contextualize_chunk(chunk["content"], doc["text"])
+            key = (meta["source"], meta.get("page_url"), chunk["content"], base["context_hash"])
+            meta["contextualized_chunk"] = (previous or {}).get(key) or contextualize_chunk(chunk["content"], doc["text"])
         records.append({"content": chunk["content"], "metadata": meta})
     return records
 
@@ -98,6 +121,9 @@ def build(args) -> list[Path]:
     Rows that fail are warned and skipped; exits non-zero only when nothing was built."""
     rows = read_rows(args.yaml)
     wanted = None if "all" in args.sources else set(args.sources)
+    out_dir = Path(args.data_dir)
+    # sentences from the last build into this dir: unchanged chunks of unchanged documents keep theirs
+    previous = {} if args.no_contextualize else previous_contexts(out_dir)
     groups = defaultdict(list)
     for source_type, doc_type, link, where in tqdm(rows, desc="sources", unit="row"):
         key = doc_type or UNTYPED
@@ -113,10 +139,9 @@ def build(args) -> list[Path]:
             continue
         tqdm.write(f"{where}: {source_type} {link} -> {len(docs)} documents", file=sys.stderr)
         for doc in tqdm(docs, desc=f"{key} <- {link[-40:]}", unit="doc", leave=False):
-            groups[key].extend(to_records(doc, doc_type, not args.no_contextualize))
+            groups[key].extend(to_records(doc, doc_type, not args.no_contextualize, previous))
     if not groups:
         sys.exit("no records built: no row produced a selected doc_type (see the warnings above, if any)")
-    out_dir = Path(args.data_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for key, records in groups.items():
