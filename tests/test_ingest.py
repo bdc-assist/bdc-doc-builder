@@ -164,6 +164,50 @@ def test_reset_remote_checks_the_server_before_dropping_anything():
     assert calls == ["/ingest/lookup"], calls
 
 
+def test_reset_remote_drops_the_collection_on_a_current_server():
+    calls, original = [], ingest._api_post
+    ingest._api_post = lambda path, payload: calls.append((path, payload)) or {}
+    try:
+        with redirect_stdout(io.StringIO()):
+            ingest.reset_remote()
+    finally:
+        ingest._api_post = original
+    assert calls == [("/ingest/lookup", {"sources": []}), ("/ingest/reset", None)], calls
+
+
+def test_files_without_chunks_are_skipped():
+    """An empty .pkl or a blank markdown file yields no chunks: no line, no lookup, no write for it,
+    and the other files still go through."""
+    server, emb, out = FakeServer(), CountingEmb(), io.StringIO()
+    with tempfile.TemporaryDirectory() as d:
+        with open(Path(d) / "empty.pkl", "wb") as f:
+            pickle.dump([], f)
+        (Path(d) / "blank.md").write_text("", encoding="utf-8")
+        with open(Path(d) / "docs.pkl", "wb") as f:
+            pickle.dump([_row("one")], f)
+        with redirect_stdout(out):
+            assert _run_paths(server, emb, [Path(d)]) == 1
+    assert [path for path, _ in server.calls] == ["/ingest/lookup", "/ingest/upsert"], server.calls
+    assert "empty.pkl" not in out.getvalue() and "blank.md" not in out.getvalue(), out.getvalue()
+
+
+def test_lookup_is_split_into_push_batch_sized_requests():
+    """A file with more sources than PUSH_BATCH asks in several lookups and must still see every
+    stored chunk: a batch whose answer got lost would re-embed unchanged documents."""
+    server, rows = FakeServer(), [_row("text", source=f"doc{n}.md") for n in range(5)]
+    original_batch, ingest.PUSH_BATCH = ingest.PUSH_BATCH, 2
+    try:
+        _push(server, CountingEmb(), rows)
+        server.calls.clear()
+        emb = CountingEmb()
+        assert _push(server, emb, rows) == 0 and emb.texts == 0, "every batch's stored chunks were found"
+    finally:
+        ingest.PUSH_BATCH = original_batch
+    lookups = [payload["sources"] for path, payload in server.calls if path == "/ingest/lookup"]
+    assert [len(s) for s in lookups] == [2, 2, 1], lookups
+    assert sorted(s for batch in lookups for s in batch) == [f"doc{n}.md" for n in range(5)]
+
+
 def test_ingest_tunables_come_from_config():
     import inspect
 
@@ -515,6 +559,9 @@ if __name__ == "__main__":
     test_a_document_in_two_files_is_refused_before_anything_happens()
     test_the_same_file_listed_twice_is_pushed_once()
     test_reset_remote_checks_the_server_before_dropping_anything()
+    test_reset_remote_drops_the_collection_on_a_current_server()
+    test_files_without_chunks_are_skipped()
+    test_lookup_is_split_into_push_batch_sized_requests()
     test_api_post_retries_dropped_connections_but_not_http_errors()
     test_embed_batched_rejects_missing_vectors()
     test_iter_files_skips_git_clones()
