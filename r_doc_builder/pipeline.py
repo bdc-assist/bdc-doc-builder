@@ -75,7 +75,10 @@ def previous_contexts(out_dir):
             with open(path, "rb") as f:
                 for row in pickle.load(f):
                     meta = row["metadata"]
-                    if meta.get("contextualized_chunk") and meta.get("context_hash"):
+                    # a sentence equal to the content is the fallback of a failed LLM call: not reused, so a
+                    # transient failure is retried next build (a chunk the content filter always blocks costs
+                    # one call per build; its embedded text stays the raw content, so the push doesn't re-embed it)
+                    if meta.get("contextualized_chunk") not in (None, "", row["content"]) and meta.get("context_hash"):
                         key = (meta.get("source"), meta.get("page_url"), row["content"], meta["context_hash"])
                         found[key] = meta["contextualized_chunk"]
         except Exception as e:

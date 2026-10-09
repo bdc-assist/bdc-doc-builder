@@ -669,6 +669,15 @@ def test_unreadable_previous_pkl_is_warned_and_ignored():
         assert "warning:" in err.getvalue() and "docs.pkl" in err.getvalue(), err.getvalue()
 
 
+def test_previous_contexts_skips_the_raw_text_fallback_of_a_failed_call():
+    rows = [{"content": "raw", "metadata": {"source": "s", "page_url": "u", "contextualized_chunk": "raw", "context_hash": "h"}},
+            {"content": "real", "metadata": {"source": "s", "page_url": "u", "contextualized_chunk": "ctx real", "context_hash": "h"}}]
+    with tempfile.TemporaryDirectory() as d:
+        with open(Path(d) / "docs.pkl", "wb") as f:
+            pickle.dump(rows, f)
+        assert pipeline.previous_contexts(d) == {("s", "u", "real", "h"): "ctx real"}
+
+
 if __name__ == "__main__":
     test_chunk_settings_come_from_config()
     test_data_dir_follows_config_dir()
@@ -701,4 +710,5 @@ if __name__ == "__main__":
     test_build_reuses_context_of_unchanged_documents()
     test_context_reuse_misses_when_prompt_or_model_changes()
     test_unreadable_previous_pkl_is_warned_and_ignored()
+    test_previous_contexts_skips_the_raw_text_fallback_of_a_failed_call()
     print("pipeline self-check passed")
