@@ -33,7 +33,7 @@ required.
 | `--doc-type T` | `doc_type` metadata for every chunk pushed in this run. Default: whatever each record carries. |
 | `--reset` | Drop the remote collection before pushing. Runs after `--build` finishes, so a failed build leaves the DB untouched. |
 | `--summarize` | For `.pkl` records with no contextualized chunk, embed an LLM summary of the content instead of the raw content. One LLM call per record. |
-| `--dry-run` | Report what the push would embed, update and delete (and which sources would lose chunks), then stop: nothing embedded, nothing written. Not with `--reset`. With `--build` the pipeline still runs and writes its `.pkl` files. |
+| `--dry-run` | Report what the push would embed, update and delete (and which sources would lose chunks), then stop: nothing embedded, nothing written. Not with `--reset`. With `--build` the pipeline still runs and writes its `.pkl` files; with `--summarize` the summary LLM calls are still made. |
 | `--build` | Run the preprocessing pipeline before pushing. The options below are passed through to it. |
 | `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
 | `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
@@ -112,7 +112,8 @@ Contextualizing reuses the previous build: a chunk whose text and document are u
 the last build into the same `--data-dir` keeps its context sentence (any doc_type's `.pkl`
 counts), so only new or edited documents call the LLM — and unchanged chunks keep the same
 embedded text, so the push skips them. Changing the `contextualize_chunk` prompt or
-`COMPLETION_MODEL` re-contextualizes everything; so does building into an empty `--data-dir`.
+`COMPLETION_MODEL` re-contextualizes everything; so does building into an empty `--data-dir`. A chunk whose
+last contextualize call failed (raw text kept) is retried on the next build.
 
 Source types and the yaml format are described in the README.
 
@@ -139,7 +140,9 @@ uv run python -m r_doc_builder.ingest data/faq.pkl
   Each file prints `N to embed, N to update, N unchanged, N to delete`.
 - Chunks a pushed document no longer produces are deleted, after its new chunks are stored.
   Documents that are not part of the push are never touched; a document removed from its source
-  entirely stays in the DB until `--reset`.
+  entirely stays in the DB until `--reset`: run a `--build --reset` now and then.
+- A document (same `source` and `page_url`) present in two pushed files is refused before anything
+  is written: it is usually a stale `.pkl` left by a renamed or emptied doc_type. Delete it.
 - Chunks are embedded (about `EMBEDDING_BATCH_TOKENS` tokens per request) and upserted
   `PUSH_BATCH` at a time, so a run that dies loses at most one batch: rerun the same command
   **without `--reset`** and it carries on where it stopped.
@@ -150,7 +153,11 @@ uv run python -m r_doc_builder.ingest data/faq.pkl
   values in the `.pkl` files are dropped. A key a record no longer has is removed from the
   stored chunk.
 - The first push after upgrading to this version re-embeds everything once: chunks stored by
-  older versions carry no `embed_hash`.
+  older versions carry no `embed_hash`. The first `--build` also re-contextualizes everything
+  (old `.pkl` files have no `context_hash`), so build once with the new version and push those files.
+- After pushing with an older version of this tool, push with `--reset`: an older push keeps the
+  stored `embed_hash` while replacing the vector, so a later push could skip a chunk it should
+  re-embed.
 
 ## Environment
 
@@ -161,7 +168,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 | --- | --- | --- |
 | `DOC_MCP_URL` | push | r-doc-mcp base URL (default `http://127.0.0.1:8000`) |
 | `INGEST_TOKEN` | push | Bearer token; must match the server's |
-| `PUSH_BATCH` | push | Chunks per upsert request (default 200) |
+| `PUSH_BATCH` | push | Chunks per upsert request, the resume slice size, and the batch size of lookup/update/delete requests (default 200) |
 | `PUSH_TIMEOUT` | push | Seconds allowed for one ingest API request (default 300) |
 | `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_MODEL_PROVIDER` | push | Embedding endpoint. **Must match what r-doc-mcp queries with.** |
 | `EMBEDDING_BATCH_TOKENS` | push | Token budget per embedding request (default 6000) |
@@ -187,6 +194,13 @@ database that matters, rehearse on a copy. The commands use the BDC config and r
 r-doc-mcp commands run in that repo, everything else in this one, each repo with its own `.env`
 for the embedding endpoint.
 
+0. **Build once with this version**, because old `.pkl` files carry no `context_hash`; the rehearsal
+   and the production push both use these files:
+
+   ```bash
+   CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.pipeline --pull
+   ```
+
 1. **Copy the database.** Stop writes to it first (scale the r-doc-mcp deployment to zero, or make
    sure no push is running), then copy its `DB_PATH` (e.g. `kubectl cp` from the pod) to
    `./before-db` and again to `./rehearsal-db`. `./before-db` is never pushed to. Serve both, each
@@ -198,7 +212,9 @@ for the embedding endpoint.
    ```
 
 2. **Dry run**: on the first run after upgrading, expect every chunk "to embed" (no `embed_hash`
-   stored yet) and nothing to delete.
+   stored yet) and nothing to delete. That premise holds when `data/bdc/` is what the DB was last
+   pushed from; a DB pushed by older versions without `--reset` holds orphaned chunks, which show up
+   as deletes (and the count drops). That is expected: review them in the dry run.
 
    ```bash
    DOC_MCP_URL=http://127.0.0.1:8100 INGEST_TOKEN=rehearse CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.ingest data/bdc/ --dry-run
@@ -207,23 +223,31 @@ for the embedding endpoint.
 3. **Push, then push again** (same command without `--dry-run`, twice). The second run must print
    `0 to embed, 0 to update, ... 0 to delete` for every file, and `curl http://127.0.0.1:8100/health`
    must show the same `documents` count as `curl http://127.0.0.1:8099/health`.
-4. **Same answers**: with both servers up, run this (in this repo):
+4. **Same answers**: save this once as `answers.py` (in this repo):
 
-   ```bash
-   uv run python - <<'EOF'
+   ```python
+   import sys
    import requests
+   base = sys.argv[1]
    questions = [("What is PIC-SURE and what can I do with it in BDC?", {}),
                 ("Whats the difference between picsure open access and authorized access?", {"mode": "keyword"}),
                 ("What are the latest BDC events, and are any more coming up?", {"date_from": "2025-01-01"}),
                 ("How do I upload my own data to BDC?", {})]
    for q, extra in questions:
-       before, after = ([h["metadata"].get("source") for h in requests.post(f"http://127.0.0.1:{port}/search",
-                         json={"query": q, **extra}).json()] for port in (8099, 8100))
-       print("same     " if before == after else "DIFFERENT", q, before, after, sep="\n  ")
-   EOF
+       hits = requests.post(f"{base}/search", json={"query": q, **extra}).json()
+       print(q, [h["metadata"].get("source") for h in hits], sep="
+  ")
    ```
 
-   Expect `same` for all four: nothing changed in the content, so nothing should change in the results.
+   Run it against each server into a file and compare:
+
+   ```bash
+   uv run python answers.py http://127.0.0.1:8099 > before.txt
+   uv run python answers.py http://127.0.0.1:8100 > after.txt
+   diff before.txt after.txt
+   ```
+
+   No output means the same answers: nothing changed in the content, so nothing should change in the results.
 5. **Compare with a fresh push**: delete `./oracle-db` if it exists, serve the empty `./oracle-db`
    on port 8101 the same way, push the same `.pkl` files to it, stop the 8100 and 8101 servers,
    then (r-doc-mcp repo):
@@ -233,22 +257,31 @@ for the embedding endpoint.
    ```
 
    Expect `same`. (`--atol`: a real embedding endpoint can differ in the last float digits.)
-6. **Kill a run**: restart the 8100 server, edit a few pages in a source clone, rebuild
-   (`--build --sources <type>`), start the push and stop it part-way (Ctrl-C, or drop the
-   port-forward), rerun it, then repeat step 5 — with a new, empty `./oracle-db` and every `.pkl`
-   file, so the fresh push holds the edits too.
+6. **Kill a run**: copy `data/bdc/` to `./rehearsal-data` and do everything below with
+   `--data-dir ./rehearsal-data` (build and push), so no test edit reaches production. Restart the
+   8100 server, edit a few pages in a source clone, rebuild
+   (`--build --sources <type> --data-dir ./rehearsal-data`), start the push of `./rehearsal-data` and stop
+   it part-way (Ctrl-C, or drop the port-forward), rerun it, then repeat step 5 with a new, empty
+   `./oracle-db` and every `.pkl` file of `./rehearsal-data`, so the fresh push holds the edits too.
+   End by undoing the clone edits: `git -C data/repos/<clone> checkout .`.
 
 Then production:
 
 1. **Back up** the database directory with writes stopped (or snapshot its volume). That backup is
    the rollback.
 2. Deploy r-doc-mcp first; `/health` must show the same document count as before.
-3. Run the step-4 script against production once before pushing (one port), and keep its output:
-   those are the "before" answers.
+3. Run `answers.py` against production once before pushing, into a file: those are the "before"
+   answers (`uv run python answers.py <prod url> > before.txt`).
 4. Run the push with `--dry-run` against production and read the counts and the sources that would
-   lose chunks.
-5. Push. Check `/health`, and run the step-4 script again: the answers should match the ones kept
-   in step 3, except where the pushed content really changed.
+   lose chunks. The push command, with the build from step 0 already in `data/bdc/`:
+
+   ```bash
+   DOC_MCP_URL=<prod url> INGEST_TOKEN=<token> CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.ingest data/bdc/ --dry-run
+   ```
+
+5. Push: the same command without `--dry-run`. Check `/health`, run `answers.py` again into
+   `after.txt` and `diff before.txt after.txt`: the answers should match, except where the pushed
+   content really changed.
 6. Keep the backup until the next refresh has succeeded. To roll back, restore the directory.
    The previous ingest version still works against the new r-doc-mcp (its endpoints are additive).
 

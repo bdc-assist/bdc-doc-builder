@@ -338,7 +338,7 @@ def test_incremental_pushes_match_a_fresh_push():
     python = _mcp_python()
     if not python:
         print(f"skipped: no r-doc-mcp at {MCP_DIR} (set DOC_MCP_DIR, run `uv sync` there)")
-        return
+        return False
     rounds, seed = int(os.getenv("E2E_ROUNDS", "12")), int(os.getenv("E2E_SEED", "12"))
     rng = random.Random(seed)
     schedule = (rng.sample(KINDS, len(KINDS)) + [rng.choice(KINDS) for _ in range(rounds)])[:rounds]
@@ -378,8 +378,9 @@ def test_incremental_pushes_match_a_fresh_push():
     finally:
         (ingest.PUSH_BATCH, ingest.time.sleep, ingest.get_emb, ingest._api_post,
          pipeline.contextualize_chunk, sources.CHUNK_SIZE, sources._splitter) = saved
+    return True
 
 
 if __name__ == "__main__":
-    test_incremental_pushes_match_a_fresh_push()
-    print("e2e self-check passed")
+    if test_incremental_pushes_match_a_fresh_push():
+        print("e2e self-check passed")
