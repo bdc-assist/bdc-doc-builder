@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import pickle
 import time
 import uuid
@@ -33,6 +34,8 @@ def load_pkl(path: Path, doc_type: str | None = None, use_summary: bool = False)
             meta["doc_type"] = doc_type
         meta.setdefault("source", str(path.name))
         embed_text = meta.get("contextualized_chunk") or meta.get("text_to_embed")
+        # ponytail: summaries are made before ingest_paths asks the DB what it holds, and differ every
+        # run, so --summarize records are re-summarized and re-embedded on every push
         if not embed_text and use_summary:
             from .contextualize import get_summary
             embed_text = meta["summary"] = get_summary(row["content"])
@@ -99,7 +102,7 @@ def _embed_batched(emb, texts, desc="embedding"):
     gateways); a whole file at once blows that. Budget is estimated at ~4 chars/token."""
     budget = EMBEDDING_BATCH_TOKENS * 4
     vectors, batch, batch_chars = [], [], 0
-    with tqdm(total=len(texts), desc=desc) as pbar:
+    with tqdm(total=len(texts), desc=desc, disable=desc is None) as pbar:
         for text in texts:
             text = text[:budget]  # a single oversized chunk still has to fit one request
             if batch and batch_chars + len(text) > budget:
@@ -145,22 +148,58 @@ def reset_remote():
     _api_post("/ingest/reset", None)
 
 
-def push_chunks(ids, contents, embeddings, metas, desc="pushing"):
-    """Upsert chunks to r-doc-mcp in request-sized batches (embeddings are fat)."""
-    batch = PUSH_BATCH
-    for i in tqdm(range(0, len(ids), batch), desc=desc):
-        _api_post("/ingest/upsert", [
-            {"id": cid, "content": content, "embedding": emb, "metadata": meta}
-            for cid, content, emb, meta in zip(ids[i:i + batch], contents[i:i + batch],
-                                              embeddings[i:i + batch], metas[i:i + batch])
-        ])
+def _post_batches(path, rows):
+    """POST rows to the ingest API in PUSH_BATCH-sized requests (embeddings are fat)."""
+    for i in range(0, len(rows), PUSH_BATCH):
+        _api_post(path, rows[i:i + PUSH_BATCH])
+
+
+def push_chunks(ids, contents, embeddings, metas):
+    """Upsert chunks to r-doc-mcp in request-sized batches."""
+    _post_batches("/ingest/upsert", [{"id": cid, "content": content, "embedding": emb, "metadata": meta}
+                                     for cid, content, emb, meta in zip(ids, contents, embeddings, metas)])
+
+
+def _lookup(metas):
+    """What the DB holds for this file's documents: {id: stored metadata}. Asked by source, then
+    narrowed to the file's (source, page_url) pairs: two documents can share a source (the same
+    relative path in two git repos), and one file's push must never touch the other's chunks."""
+    docs = {(m.get("source"), m.get("page_url")) for m in metas}
+    sources = sorted({s for s, _ in docs})
+    stored = {}
+    for i in range(0, len(sources), PUSH_BATCH):
+        stored.update(_api_post("/ingest/lookup", {"sources": sources[i:i + PUSH_BATCH]}))
+    return {cid: m for cid, m in stored.items() if (m.get("source"), m.get("page_url")) in docs}
+
+
+def _plan(ids, metas, stored):
+    """Diff a file's chunks against what the DB holds for its documents -> (indexes to embed,
+    indexes whose metadata alone changed, stored ids the file no longer produces). A chunk is
+    embedded only when its embed_hash (model + embedded text) differs from the stored one."""
+    embed, update = [], []
+    for i, (cid, meta) in enumerate(zip(ids, metas)):
+        old = stored.get(cid)
+        if old is None or old.get("embed_hash") != meta["embed_hash"]:
+            embed.append(i)
+        elif old != meta:
+            update.append(i)
+    return embed, update, sorted(stored.keys() - set(ids))
+
+
+def _with_removals(meta, old):
+    """Chroma merges metadata into what is stored: a key the new record dropped goes out as None,
+    which deletes it."""
+    return {**meta, **{k: None for k in old.keys() - meta.keys()}}
 
 
 def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) -> int:
-    """Load, embed, and push all supported files under the given paths.
-    doc_type, when given, applies to every chunk; otherwise records keep the doc_type they
-    carry (none for ad-hoc files)."""
+    """Load, embed, and push all supported files under the given paths, embedding only what the DB
+    doesn't hold yet: unchanged chunks are skipped, metadata-only changes updated in place, and
+    chunks a pushed document no longer produces deleted. doc_type, when given, applies to every
+    chunk; otherwise records keep the doc_type they carry (none for ad-hoc files).
+    Returns the number of chunks embedded."""
     emb = get_emb()
+    model = getattr(emb, "model", None) or ""
     total = 0
     for f in iter_files(paths):
         if f.suffix == ".pkl":
@@ -169,11 +208,26 @@ def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) 
             contents, metas, embed_texts = load_file(f, doc_type)
         if not contents:
             continue
-        embeddings = _embed_batched(emb, embed_texts, desc=f"embedding {f.name}")
         ids = _chunk_ids(contents, metas)
-        push_chunks(ids, contents, embeddings, metas, desc=f"pushing {f.name}")
-        total += len(contents)
-        print(f"pushed {len(contents):4d} chunks from {f}")
+        for meta, text in zip(metas, embed_texts):
+            meta["embed_hash"] = hashlib.sha256(f"{model}\n{text}".encode()).hexdigest()[:16]
+        stored = _lookup(metas)
+        embed, update, stale = _plan(ids, metas, stored)
+        print(f"{f}: {len(embed)} to embed, {len(update)} to update, "
+              f"{len(ids) - len(embed) - len(update)} unchanged, {len(stale)} to delete")
+        _post_batches("/ingest/update", [{"id": ids[i], "metadata": _with_removals(metas[i], stored[ids[i]])}
+                                         for i in update])
+        # each slice is stored before the next is embedded: a killed run loses at most one slice,
+        # and the rerun's lookup skips everything already pushed
+        with tqdm(total=len(embed), desc=f"embedding {f.name}", disable=not embed) as bar:
+            for start in range(0, len(embed), PUSH_BATCH):
+                part = embed[start:start + PUSH_BATCH]
+                vectors = _embed_batched(emb, [embed_texts[i] for i in part], desc=None)
+                push_chunks([ids[i] for i in part], [contents[i] for i in part], vectors,
+                            [_with_removals(metas[i], stored.get(ids[i], {})) for i in part])
+                bar.update(len(part))
+        _post_batches("/ingest/delete", stale)  # last: a document never loses chunks before their replacements are in
+        total += len(embed)
     return total
 
 
@@ -200,7 +254,7 @@ def main(argv=None):
     if args.reset:
         reset_remote()
     total = ingest_paths(built + args.paths, args.doc_type, args.summarize)
-    print(f"done: pushed {total} chunks to {DOC_MCP_URL}")
+    print(f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
 
 
 if __name__ == "__main__":

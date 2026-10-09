@@ -113,12 +113,31 @@ uv run python -m r_doc_builder.ingest data/faq.pkl
 ## How a push behaves
 
 - Chunk ids are derived from `source`, `page_url`, and content, so pushing the same file
-  again updates its chunks instead of duplicating them. Only `--reset` deletes anything.
-- Embeddings go out in batches of about `EMBEDDING_BATCH_TOKENS` tokens; upserts in
-  batches of `PUSH_BATCH` chunks. A failed embedding call is retried `RETRIES` times with
-  exponential backoff, then the run aborts.
+  again updates its chunks instead of duplicating them.
+- Before embedding anything, ingest asks r-doc-mcp what it holds for the file's documents and
+  compares chunk by chunk. Every chunk carries `embed_hash`, a fingerprint of the embedding model
+  and the exact text embedded:
+  - same `embed_hash` and metadata as stored: skipped;
+  - same `embed_hash`, other metadata (title, date, doc_type, `--doc-type`): metadata updated in
+    place, no embedding call;
+  - not stored, or another `embed_hash` (edited text, a new context sentence, another embedding
+    model): embedded and upserted.
+
+  Each file prints `N to embed, N to update, N unchanged, N to delete`.
+- Chunks a pushed document no longer produces are deleted, after its new chunks are stored.
+  Documents that are not part of the push are never touched; a document removed from its source
+  entirely stays in the DB until `--reset`.
+- Chunks are embedded (about `EMBEDDING_BATCH_TOKENS` tokens per request) and upserted
+  `PUSH_BATCH` at a time, so a run that dies loses at most one batch: rerun the same command
+  **without `--reset`** and it carries on where it stopped.
+- A failed embedding call or a dropped connection to r-doc-mcp is retried `RETRIES` times with
+  exponential backoff, then the run aborts. HTTP errors from r-doc-mcp (bad token, server error)
+  abort at once.
 - Metadata is filtered to scalar values (str, int, float, bool) before pushing. Nested
-  values in the `.pkl` files are dropped.
+  values in the `.pkl` files are dropped. A key a record no longer has is removed from the
+  stored chunk.
+- The first push after upgrading to this version re-embeds everything once: chunks stored by
+  older versions carry no `embed_hash`.
 
 ## Environment
 
@@ -137,7 +156,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 | `CONTEXT_CHAR_LIMIT` | `--build` | Truncation of the document context handed to the contextualizer (default 16000) |
 | `SUMMARY_MIN_CHARS` | `--summarize` | Texts shorter than this are embedded as-is instead of summarized (default 300) |
 | `COMPLETION_TEMPERATURE` | `--build`, `--summarize` | Sampling temperature of the contextualizer/summarizer LLM (default 0) |
-| `RETRIES` | `--build`, push | Attempts per LLM or embedding call before giving up (default 5) |
+| `RETRIES` | `--build`, push | Attempts per LLM, embedding or ingest API call before giving up (default 5) |
 | `REQUEST_TIMEOUT` | `--build` | Seconds allowed for one source download: web page, caption track (default 60) |
 | `USER_AGENT` | `--build` | User-Agent sent with web page, Freshdesk and transcript downloads (default `Mozilla/5.0`) |
 | `CONFIG_DIR` | `--build`, `--summarize` | Folder holding `sources.yaml`, `prompts.yaml` and `build.yaml` (default `config`; `examples/bdc` selects the BDC ones) |
@@ -159,3 +178,7 @@ with the rest of the project's setup. Rebuild with `--reset` after changing them
 - **`--build` prints `warning: ...` lines**: those rows were skipped (bad link for the type,
   missing path, no captions). Fix the row or ignore; the build only aborts when nothing was
   built.
+- **A push died part-way** (Ctrl-C, dropped tunnel, crash): rerun the same command without
+  `--reset`. Chunks already stored are skipped; only the rest is embedded.
+- **`ingest API call failed (ConnectionError); retrying`**: the connection to r-doc-mcp dropped
+  (often the port-forward). The run retries on its own.

@@ -2,7 +2,7 @@ import io
 import pickle
 import sys
 import tempfile
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # not installed: package sits at the repo root
@@ -34,6 +34,73 @@ class FlakyEmb:
         if self.calls <= self.fail_times:
             raise ConnectionError("tunnel dropped")
         return [[0.0] for _ in texts]
+
+
+def _merged(old, new):
+    return {k: v for k, v in {**old, **new}.items() if v is not None}
+
+
+class FakeServer:
+    """In-memory r-doc-mcp ingest API with Chroma's semantics (verified on chromadb 1.5.9): metadata
+    merges on upsert and update, and a None value deletes the key. Logs every (path, payload)."""
+
+    def __init__(self):
+        self.rows, self.calls = {}, []
+
+    def post(self, path, payload):
+        self.calls.append((path, payload))
+        if path == "/ingest/lookup":
+            return {cid: dict(r["metadata"]) for cid, r in self.rows.items()
+                    if r["metadata"].get("source") in payload["sources"]}
+        if path == "/ingest/upsert":
+            for c in payload:
+                old = self.rows.get(c["id"], {}).get("metadata", {})
+                self.rows[c["id"]] = {"content": c["content"], "embedding": c["embedding"],
+                                      "metadata": _merged(old, c["metadata"])}
+        elif path == "/ingest/update":
+            for u in payload:
+                self.rows[u["id"]]["metadata"] = _merged(self.rows[u["id"]]["metadata"], u["metadata"])
+        elif path == "/ingest/delete":
+            for cid in payload:
+                self.rows.pop(cid, None)
+        return {}
+
+    def writes(self):
+        return [path for path, _ in self.calls if path != "/ingest/lookup"]
+
+
+class CountingEmb:
+    """Deterministic vectors per (model, text); counts texts embedded. From call fail_at on, every
+    call raises like a dropped tunnel."""
+
+    def __init__(self, model="m1", fail_at=None):
+        self.model, self.fail_at, self.calls, self.texts = model, fail_at, 0, 0
+
+    def embed_documents(self, texts):
+        self.calls += 1
+        if self.fail_at is not None and self.calls >= self.fail_at:
+            raise ConnectionError("tunnel dropped")
+        self.texts += len(texts)
+        return [[float(len(t)), float(len(self.model))] for t in texts]
+
+
+def _row(content, source="doc.md", **meta):
+    return {"content": content, "metadata": {"source": source, "page_url": f"https://x/{source}", **meta}}
+
+
+def _push(server, emb, rows, name="docs.pkl", **kw):
+    """Write rows to a .pkl and run ingest_paths on it against the fake server."""
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / name
+        with open(path, "wb") as f:
+            pickle.dump(rows, f)
+        originals = (ingest._api_post, ingest.get_emb, ingest.time.sleep)
+        ingest._api_post, ingest.get_emb, ingest.time.sleep = server.post, (lambda: emb), (lambda s: None)
+        try:
+            with redirect_stderr(io.StringIO()):
+                return ingest.ingest_paths([path], **kw)
+        finally:
+            ingest._api_post, ingest.get_emb, ingest.time.sleep = originals
 
 
 def test_ingest_tunables_come_from_config():
@@ -227,10 +294,11 @@ def test_iter_files_skips_git_clones():
 
 def test_ingest_paths_keeps_record_doc_type_unless_overridden():
     pushed = []
-    originals = (ingest.get_emb, ingest._embed_batched, ingest.push_chunks)
+    originals = (ingest.get_emb, ingest._embed_batched, ingest.push_chunks, ingest._api_post)
     ingest.get_emb = lambda: FakeEmb()
     ingest._embed_batched = lambda emb, texts, desc="": [[0.0] for _ in texts]
     ingest.push_chunks = lambda ids, contents, embeddings, metas, desc="": pushed.extend(metas)
+    ingest._api_post = lambda path, payload: {}  # an empty DB: every chunk is new
     try:
         with tempfile.TemporaryDirectory() as d:
             with open(Path(d) / "faq.pkl", "wb") as f:
@@ -253,7 +321,65 @@ def test_ingest_paths_keeps_record_doc_type_unless_overridden():
                 ingest.ingest_paths([d], doc_type="docs")
             assert {m["doc_type"] for m in pushed} == {"docs"}, "--doc-type overrides everything"
     finally:
-        ingest.get_emb, ingest._embed_batched, ingest.push_chunks = originals
+        ingest.get_emb, ingest._embed_batched, ingest.push_chunks, ingest._api_post = originals
+
+
+def test_push_skips_what_is_already_stored():
+    server, emb = FakeServer(), CountingEmb()
+    rows = [_row("one"), _row("two"), _row("three")]
+    assert _push(server, emb, rows) == 3 and emb.texts == 3
+    server.calls.clear()
+    assert _push(server, emb, rows) == 0, "nothing changed: nothing embedded"
+    assert emb.texts == 3 and server.writes() == [], "and nothing written"
+
+
+def test_metadata_only_change_updates_in_place():
+    server, emb = FakeServer(), CountingEmb()
+    _push(server, emb, [_row("one", title="Old", date="2025-01-01")])
+    vector = next(iter(server.rows.values()))["embedding"]
+    server.calls.clear()
+    assert _push(server, emb, [_row("one", title="New")]) == 0, "metadata alone never re-embeds"
+    assert server.writes() == ["/ingest/update"]
+    (row,) = server.rows.values()
+    assert row["metadata"]["title"] == "New" and "date" not in row["metadata"], "a dropped key is deleted, not kept"
+    assert row["embedding"] == vector
+
+
+def test_changed_embedded_text_or_model_reembeds():
+    server = FakeServer()
+    _push(server, CountingEmb(), [_row("one", contextualized_chunk="ctx A one"), _row("two")])
+    assert _push(server, CountingEmb(), [_row("one", contextualized_chunk="ctx B one"), _row("two")]) == 1, \
+        "a new context sentence is new embedded text"
+    assert _push(server, CountingEmb(model="m2"), [_row("one", contextualized_chunk="ctx B one"), _row("two")]) == 2, \
+        "another embedding model re-embeds everything"
+
+
+def test_chunks_a_document_dropped_are_deleted_and_nothing_else():
+    server, emb = FakeServer(), CountingEmb()
+    _push(server, emb, [_row("one"), _row("two"), _row("three")])
+    # same source, another page_url: another git repo's README.md, pushed from another file
+    _push(server, emb, [{"content": "other", "metadata": {"source": "doc.md", "page_url": "https://y/doc.md"}}],
+          name="other.pkl")
+    _push(server, emb, [_row("one"), _row("three 3")])
+    assert sorted(r["content"] for r in server.rows.values()) == ["one", "other", "three 3"]
+    assert server.writes()[-1] == "/ingest/delete", "deletes go last, after the replacements are stored"
+
+
+def test_killed_push_resumes_without_reembedding_what_was_stored():
+    server, rows = FakeServer(), [_row(f"chunk {n}") for n in range(5)]
+    original_batch, ingest.PUSH_BATCH = ingest.PUSH_BATCH, 2
+    try:
+        try:
+            _push(server, CountingEmb(fail_at=2), rows)  # the second slice's embedding never succeeds
+            raise AssertionError("the dead embedding endpoint must stop the run")
+        except ConnectionError:
+            pass
+        assert len(server.rows) == 2, "the first slice was stored before the second was embedded"
+        healthy = CountingEmb()
+        assert _push(server, healthy, rows) == 3 and healthy.texts == 3, "the rerun embeds only the rest"
+        assert len(server.rows) == 5
+    finally:
+        ingest.PUSH_BATCH = original_batch
 
 
 def test_main_build_runs_pipeline_then_reset_then_push():
@@ -293,6 +419,11 @@ if __name__ == "__main__":
     test_embed_batched_rejects_missing_vectors()
     test_iter_files_skips_git_clones()
     test_ingest_paths_keeps_record_doc_type_unless_overridden()
+    test_push_skips_what_is_already_stored()
+    test_metadata_only_change_updates_in_place()
+    test_changed_embedded_text_or_model_reembeds()
+    test_chunks_a_document_dropped_are_deleted_and_nothing_else()
+    test_killed_push_resumes_without_reembedding_what_was_stored()
     test_main_build_runs_pipeline_then_reset_then_push()
     test_main_requires_paths_or_build()
     print("ingest self-check passed")
