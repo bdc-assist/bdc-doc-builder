@@ -183,13 +183,17 @@ with the rest of the project's setup. Rebuild with `--reset` after changing them
 ## Rehearsal and rollout
 
 Pushes change the database in place. Before the first push with a new version of this tool to a
-database that matters, rehearse on a copy. The commands use the BDC config; r-doc-mcp commands run
-in that repo, ingest commands in this one, each with its own `.env` for the embedding endpoint.
+database that matters, rehearse on a copy. The commands use the BDC config and run in Git Bash;
+r-doc-mcp commands run in that repo, everything else in this one, each repo with its own `.env`
+for the embedding endpoint.
 
-1. **Copy the database** (production `DB_PATH`, e.g. `kubectl cp` from the pod) to `./rehearsal-db`,
-   and keep a second copy `./before-db` for step 6. Serve the first:
+1. **Copy the database.** Stop writes to it first (scale the r-doc-mcp deployment to zero, or make
+   sure no push is running), then copy its `DB_PATH` (e.g. `kubectl cp` from the pod) to
+   `./before-db` and again to `./rehearsal-db`. `./before-db` is never pushed to. Serve both, each
+   in its own terminal (r-doc-mcp repo):
 
    ```bash
+   DB_PATH=./before-db    CONFIG_DIR=examples/bdc INGEST_TOKEN=rehearse uv run uvicorn r_doc_mcp.api:app --port 8099
    DB_PATH=./rehearsal-db CONFIG_DIR=examples/bdc INGEST_TOKEN=rehearse uv run uvicorn r_doc_mcp.api:app --port 8100
    ```
 
@@ -201,18 +205,9 @@ in that repo, ingest commands in this one, each with its own `.env` for the embe
    ```
 
 3. **Push, then push again** (same command without `--dry-run`, twice). The second run must print
-   `0 to embed, 0 to update, ... 0 to delete` for every file.
-4. **Compare with a fresh push**: serve an empty `./oracle-db` on port 8101 the same way, push the
-   same `.pkl` files to it, stop both servers, then in r-doc-mcp:
-
-   ```bash
-   uv run python tests/compare_db.py ./rehearsal-db ./oracle-db --collection bdc --atol 1e-4
-   ```
-
-   Expect `same`. (`--atol`: a real embedding endpoint can differ in the last float digits.)
-5. **Kill a run**: edit a few pages in a source clone, rebuild (`--build --sources <type>`), start the
-   push and stop it part-way (Ctrl-C, or drop the port-forward), rerun it, then repeat step 4.
-6. **Same answers**: serve `./before-db` on port 8099 (and `./rehearsal-db` on 8100), then:
+   `0 to embed, 0 to update, ... 0 to delete` for every file, and `curl http://127.0.0.1:8100/health`
+   must show the same `documents` count as `curl http://127.0.0.1:8099/health`.
+4. **Same answers**: with both servers up, run this (in this repo):
 
    ```bash
    uv run python - <<'EOF'
@@ -228,16 +223,33 @@ in that repo, ingest commands in this one, each with its own `.env` for the embe
    EOF
    ```
 
-   Expect `same` for all four: the content didn't change, so neither should the results.
+   Expect `same` for all four: nothing changed in the content, so nothing should change in the results.
+5. **Compare with a fresh push**: delete `./oracle-db` if it exists, serve the empty `./oracle-db`
+   on port 8101 the same way, push the same `.pkl` files to it, stop the 8100 and 8101 servers,
+   then (r-doc-mcp repo):
+
+   ```bash
+   uv run python tests/compare_db.py ./rehearsal-db ./oracle-db --collection bdc --atol 1e-4
+   ```
+
+   Expect `same`. (`--atol`: a real embedding endpoint can differ in the last float digits.)
+6. **Kill a run**: restart the 8100 server, edit a few pages in a source clone, rebuild
+   (`--build --sources <type>`), start the push and stop it part-way (Ctrl-C, or drop the
+   port-forward), rerun it, then repeat step 5 — with a new, empty `./oracle-db` and every `.pkl`
+   file, so the fresh push holds the edits too.
 
 Then production:
 
-1. **Back up** the database directory (or snapshot its volume). That backup is the rollback.
+1. **Back up** the database directory with writes stopped (or snapshot its volume). That backup is
+   the rollback.
 2. Deploy r-doc-mcp first; `/health` must show the same document count as before.
-3. Run the push with `--dry-run` against production and read the counts and the sources that would
+3. Run the step-4 script against production once before pushing (one port), and keep its output:
+   those are the "before" answers.
+4. Run the push with `--dry-run` against production and read the counts and the sources that would
    lose chunks.
-4. Push. Check `/health` and the step-6 questions against production.
-5. Keep the backup until the next refresh has succeeded. To roll back, restore the directory.
+5. Push. Check `/health`, and run the step-4 script again: the answers should match the ones kept
+   in step 3, except where the pushed content really changed.
+6. Keep the backup until the next refresh has succeeded. To roll back, restore the directory.
    The previous ingest version still works against the new r-doc-mcp (its endpoints are additive).
 
 ## Troubleshooting
