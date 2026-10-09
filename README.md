@@ -66,6 +66,11 @@ github.com/fastapi/fastapi: the tutorial, advanced, how-to and deployment folder
 files, inheriting `page`), and the release notes (`release`). Its code samples are not indexed:
 the pages pull them in with `{* docs_src/... *}` lines, which stay as text.
 
+`examples/fixture/` is a fake, BDC-shaped corpus for tests and rehearsals: invented text in all seven
+BDC doc_types with their real metadata shapes, built offline (markdown, local transcripts). Its
+`extras.yaml` holds ready-made rows for the shapes only networked sources produce; the tests write them
+to `extras.pkl` at run time. r-doc-mcp's `examples/fixture` serves it in its own `fixture` collection.
+
 The contextualizer and summarizer wording lives in `prompts.yaml` (the copy in `CONFIG_DIR`); edit it freely but keep the `{placeholders}`.
 How sources become chunks (chunk size and overlap, which HTML tags to drop and read, caption
 language) is in `build.yaml` next to it; rebuild with `--reset` after changing it.
@@ -105,6 +110,11 @@ and environment variable is in [docs/cli.md](docs/cli.md).
 
 ```bash
 uv run python tests/test_ingest.py     # batching, chunk ids, push batching — no network
-uv run python tests/test_pipeline.py   # yaml walk, chunkers, source types (stubbed) — no network
-uv run python tests/test_e2e.py        # incremental pushes vs a fresh push, real r-doc-mcp from ../bdc-doc-mcp — no network, ~2 min
+uv run python tests/test_pipeline.py   # yaml walk, chunkers, source types (stubbed), the fixture corpus — no network
+uv run python tests/test_fixture_cli.py  # the real CLI on the fixture corpus vs real r-doc-mcp from ../bdc-doc-mcp — offline, ~15 s
+uv run python tests/test_e2e.py        # incremental pushes vs a fresh push, real r-doc-mcp from ../bdc-doc-mcp — no network, ~80 s
 ```
+
+`test_fixture_cli.py` doubles as a safe rehearsal: it builds, pushes, edits and re-pushes the fake corpus
+into a throwaway DB with fake embeddings. `FIXTURE_EMBEDDINGS=real` uses this repo's `.env` embedding
+settings instead, to try a real endpoint without touching real data.

@@ -170,7 +170,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 | `INGEST_TOKEN` | push | Bearer token; must match the server's |
 | `PUSH_BATCH` | push | Chunks per upsert request, the resume slice size, and the batch size of lookup/update/delete requests (default 200) |
 | `PUSH_TIMEOUT` | push | Seconds allowed for one ingest API request (default 300) |
-| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_MODEL_PROVIDER` | push | Embedding endpoint. **Must match what r-doc-mcp queries with.** |
+| `EMBEDDING_URL`, `EMBEDDING_MODEL`, `EMBEDDING_MODEL_PROVIDER` | push | Embedding endpoint. **Must match what r-doc-mcp queries with.** `EMBEDDING_MODEL_PROVIDER=fake` gives offline hash vectors (tests and the fixture rehearsal only: search over them finds exact repeats, nothing else) |
 | `EMBEDDING_BATCH_TOKENS` | push | Token budget per embedding request (default 6000) |
 | `COMPLETION_URL`, `COMPLETION_MODEL`, `COMPLETION_MODEL_PROVIDER`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `AZURE_API_VERSION` | `--build`, `--summarize` | Completion LLM for the contextualizer and summarizer |
 | `CONTEXT_CHAR_LIMIT` | `--build` | Truncation of the document context handed to the contextualizer (default 16000) |
@@ -188,6 +188,11 @@ environment variables: they shape the built corpus, so they live in `<CONFIG_DIR
 with the rest of the project's setup. Rebuild with `--reset` after changing them.
 
 ## Rehearsal and rollout
+
+To try the CLI without any real data first, run `uv run python tests/test_fixture_cli.py`: it builds the
+fake corpus in `examples/fixture`, pushes it to a throwaway r-doc-mcp `fixture` collection, re-pushes,
+edits a few files, checks `--dry-run` against the real push, and compares the result with a fresh push
+— offline, with fake embeddings (`FIXTURE_EMBEDDINGS=real` uses your `.env` embedding endpoint instead).
 
 Pushes change the database in place. Before the first push with a new version of this tool to a
 database that matters, rehearse on a copy. The commands use the BDC config and run in Git Bash;
