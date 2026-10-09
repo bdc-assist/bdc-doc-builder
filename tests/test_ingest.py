@@ -150,6 +150,54 @@ def test_ingest_api_errors_stop_the_push():
         ingest.requests.post = original
 
 
+def test_api_post_retries_dropped_connections_but_not_http_errors():
+    """A dropped port-forward to r-doc-mcp is retried like the embedding endpoint's; an HTTP error
+    (bad token, server bug) is an answer, and raises at once."""
+    import requests
+
+    from r_doc_builder import config
+
+    calls = []
+    ok = type("Resp", (), {"ok": True, "json": lambda self: {"fine": 1}})()
+
+    def flaky(url, **kw):
+        calls.append(url)
+        if len(calls) < 3:
+            raise requests.ConnectionError("tunnel dropped")
+        return ok
+
+    def dead(url, **kw):
+        calls.append(url)
+        raise requests.Timeout("no answer")
+
+    bad = type("Resp", (), {"ok": False, "status_code": 401, "text": "bad ingest token"})()
+    original_post, original_sleep = ingest.requests.post, ingest.time.sleep
+    ingest.time.sleep = lambda seconds: None
+    try:
+        ingest.requests.post = flaky
+        assert ingest._api_post("/ingest/upsert", []) == {"fine": 1} and len(calls) == 3, "retried until it answered"
+
+        calls.clear()
+        ingest.requests.post = dead
+        try:
+            ingest._api_post("/ingest/upsert", [])
+            raise AssertionError("a connection that never comes back must raise")
+        except requests.Timeout:
+            pass
+        assert len(calls) == config.RETRIES, "gives up after the RETRIES budget"
+
+        calls.clear()
+        ingest.requests.post = lambda url, **kw: calls.append(url) or bad
+        try:
+            ingest._api_post("/ingest/upsert", [])
+            raise AssertionError("an HTTP error must raise")
+        except RuntimeError as e:
+            assert "401" in str(e), e
+        assert len(calls) == 1, "HTTP errors are not retried"
+    finally:
+        ingest.requests.post, ingest.time.sleep = original_post, original_sleep
+
+
 def test_embed_batched_rejects_missing_vectors():
     """An embedder returning fewer vectors than texts used to be zipped away: chunks silently
     missing from the push. Stop before pushing instead."""
@@ -241,6 +289,7 @@ if __name__ == "__main__":
     test_ids_are_stable_and_unique()
     test_push_chunks_batches_requests()
     test_ingest_api_errors_stop_the_push()
+    test_api_post_retries_dropped_connections_but_not_http_errors()
     test_embed_batched_rejects_missing_vectors()
     test_iter_files_skips_git_clones()
     test_ingest_paths_keeps_record_doc_type_unless_overridden()

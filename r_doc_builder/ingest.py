@@ -119,9 +119,21 @@ def _embed_batched(emb, texts, desc="embedding"):
 # --- push client: r-doc-mcp owns the DB; we only talk to its ingest API ---
 
 def _api_post(path, payload):
+    """kubectl port-forward drops (see _embed_with_retry) hit the ingest API too: retry connection
+    errors and timeouts with the same backoff. Every ingest endpoint is idempotent, so a retried
+    request is safe. An HTTP error (bad token, server bug) is an answer, not a dropped tunnel:
+    raise it at once."""
     url = DOC_MCP_URL + path
-    resp = requests.post(url, json=payload, timeout=PUSH_TIMEOUT,
-                         headers={"Authorization": f"Bearer {INGEST_TOKEN}"})
+    for attempt in range(RETRIES):
+        try:
+            resp = requests.post(url, json=payload, timeout=PUSH_TIMEOUT,
+                                 headers={"Authorization": f"Bearer {INGEST_TOKEN}"})
+            break
+        except (requests.ConnectionError, requests.Timeout) as e:
+            if attempt == RETRIES - 1:
+                raise
+            print(f"  ingest API call failed ({type(e).__name__}); retrying in {2 ** attempt}s")
+            time.sleep(2 ** attempt)
     if not resp.ok:
         raise RuntimeError(f"POST {url} -> {resp.status_code}: {resp.text[:300]}")
     return resp.json()
