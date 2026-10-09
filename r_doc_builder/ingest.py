@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import pickle
+import sys
 import time
 import uuid
 from collections import Counter
@@ -124,7 +125,7 @@ def _embed_batched(emb, texts, desc="embedding"):
 
 def _api_post(path, payload):
     """kubectl port-forward drops (see _embed_with_retry) hit the ingest API too: retry connection
-    errors and timeouts with the same backoff. Every ingest endpoint is idempotent, so a retried
+    errors, connections dropped mid-body and timeouts with the same backoff. Every ingest endpoint is idempotent, so a retried
     request is safe. An HTTP error (bad token, server bug) is an answer, not a dropped tunnel:
     raise it at once."""
     url = DOC_MCP_URL + path
@@ -133,7 +134,7 @@ def _api_post(path, payload):
             resp = requests.post(url, json=payload, timeout=PUSH_TIMEOUT,
                                  headers={"Authorization": f"Bearer {INGEST_TOKEN}"})
             break
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
             if attempt == RETRIES - 1:
                 raise
             print(f"  ingest API call failed ({type(e).__name__}); retrying in {2 ** attempt}s")
@@ -144,7 +145,10 @@ def _api_post(path, payload):
 
 
 def reset_remote():
-    """Drop the server-side collection so the next push starts empty."""
+    """Drop the server-side collection so the next push starts empty. An r-doc-mcp older than this
+    push client 404s on /ingest/lookup: ask it first, so a mismatch stops the run before the DB is
+    dropped and a push that cannot work follows."""
+    _api_post("/ingest/lookup", {"sources": []})
     print("resetting remote collection")
     _api_post("/ingest/reset", None)
 
@@ -203,11 +207,19 @@ def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, 
     emb = get_emb()
     model = getattr(emb, "model", None) or ""
     total = 0
-    for f in iter_files(paths):
-        if f.suffix == ".pkl":
-            contents, metas, embed_texts = load_pkl(f, doc_type, use_summary)
-        else:
-            contents, metas, embed_texts = load_file(f, doc_type)
+    files = list({f.resolve(): f for f in iter_files(paths)}.values())  # a directory and its file listed twice push once
+    # ponytail: every file's records are held in memory at once; stream per file if a corpus outgrows RAM
+    loaded = [(f, *(load_pkl(f, doc_type, use_summary) if f.suffix == ".pkl" else load_file(f, doc_type)))
+              for f in files]
+    # a document in two files would be diffed against the DB by each file alone, so the later one
+    # would revert the earlier one's version on every push: refuse before anything is written
+    owner = {}
+    for f, _, metas, _ in loaded:
+        for doc in {(m.get("source"), m.get("page_url")) for m in metas}:
+            if owner.setdefault(doc, f) != f:
+                sys.exit(f"document {doc[0]} ({doc[1]}) is in both {owner[doc]} and {f}: probably a stale .pkl "
+                         f"left by a renamed or emptied doc_type; delete the stale file and push again")
+    for f, contents, metas, embed_texts in loaded:
         if not contents:
             continue
         ids = _chunk_ids(contents, metas)

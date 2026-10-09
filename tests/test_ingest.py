@@ -103,6 +103,67 @@ def _push(server, emb, rows, name="docs.pkl", **kw):
             ingest._api_post, ingest.get_emb, ingest.time.sleep = originals
 
 
+def _run_paths(server, emb, paths):
+    originals = (ingest._api_post, ingest.get_emb, ingest.time.sleep)
+    ingest._api_post, ingest.get_emb, ingest.time.sleep = server.post, (lambda: emb), (lambda s: None)
+    try:
+        with redirect_stderr(io.StringIO()):
+            return ingest.ingest_paths(paths)
+    finally:
+        ingest._api_post, ingest.get_emb, ingest.time.sleep = originals
+
+
+def test_a_document_in_two_files_is_refused_before_anything_happens():
+    server, emb = FakeServer(), CountingEmb()
+    with tempfile.TemporaryDirectory() as d:
+        for name, doctype in (("a.pkl", "old"), ("b.pkl", "new")):
+            with open(Path(d) / name, "wb") as f:
+                pickle.dump([_row("same doc", doc_type=doctype)], f)
+        for dry in (False, True):
+            try:
+                originals = (ingest._api_post, ingest.get_emb)
+                ingest._api_post, ingest.get_emb = server.post, (lambda: emb)
+                try:
+                    with redirect_stderr(io.StringIO()):
+                        ingest.ingest_paths([Path(d)], dry_run=dry)
+                finally:
+                    ingest._api_post, ingest.get_emb = originals
+                raise AssertionError("a document in two files must be refused")
+            except SystemExit as e:
+                msg = str(e)
+                assert "doc.md" in msg and "a.pkl" in msg and "b.pkl" in msg, msg
+            assert server.calls == [] and emb.texts == 0, "nothing may happen before the check"
+
+
+def test_the_same_file_listed_twice_is_pushed_once():
+    server, emb = FakeServer(), CountingEmb()
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "docs.pkl"
+        with open(path, "wb") as f:
+            pickle.dump([_row("one"), _row("two")], f)
+        assert _run_paths(server, emb, [Path(d), path]) == 2
+    assert emb.texts == 2 and len(server.rows) == 2
+
+
+def test_reset_remote_checks_the_server_before_dropping_anything():
+    calls, original = [], ingest._api_post
+
+    def old_server(path, payload):
+        calls.append(path)
+        raise RuntimeError("POST /ingest/lookup -> 404: Not Found")
+
+    ingest._api_post = old_server
+    try:
+        try:
+            ingest.reset_remote()
+            raise AssertionError("an old server must stop the reset")
+        except RuntimeError as e:
+            assert "404" in str(e)
+    finally:
+        ingest._api_post = original
+    assert calls == ["/ingest/lookup"], calls
+
+
 def test_ingest_tunables_come_from_config():
     import inspect
 
@@ -243,6 +304,11 @@ def test_api_post_retries_dropped_connections_but_not_http_errors():
     try:
         ingest.requests.post = flaky
         assert ingest._api_post("/ingest/upsert", []) == {"fine": 1} and len(calls) == 3, "retried until it answered"
+
+        calls.clear()
+        ingest.requests.post = lambda url, **kw: (calls.append(url), (_ for _ in ()).throw(
+            requests.exceptions.ChunkedEncodingError("dropped mid-body")) if len(calls) < 2 else ok)[1]
+        assert ingest._api_post("/ingest/upsert", []) == {"fine": 1} and len(calls) == 2, "mid-body drop retried"
 
         calls.clear()
         ingest.requests.post = dead
@@ -446,6 +512,9 @@ if __name__ == "__main__":
     test_ids_are_stable_and_unique()
     test_push_chunks_batches_requests()
     test_ingest_api_errors_stop_the_push()
+    test_a_document_in_two_files_is_refused_before_anything_happens()
+    test_the_same_file_listed_twice_is_pushed_once()
+    test_reset_remote_checks_the_server_before_dropping_anything()
     test_api_post_retries_dropped_connections_but_not_http_errors()
     test_embed_batched_rejects_missing_vectors()
     test_iter_files_skips_git_clones()
