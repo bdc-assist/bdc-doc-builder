@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from functools import lru_cache
@@ -68,12 +69,27 @@ def _provider(kind: str) -> str:
     return "openai"
 
 
+class FakeEmbeddings:
+    """EMBEDDING_MODEL_PROVIDER=fake: a vector made from a hash of the text. Offline, free and
+    deterministic, for tests and the fixture rehearsal (tests/test_fixture_cli.py). Search over it only
+    finds exact repeats. r-doc-mcp has the same class, so query and document vectors agree."""
+    model = "fake"  # part of every embed_hash: switching to or from a real model re-embeds
+
+    def embed_documents(self, texts):
+        return [self.embed_query(t) for t in texts]
+
+    def embed_query(self, text):
+        return [b / 255 for b in hashlib.sha256(text.encode()).digest()]
+
+
 @lru_cache
 def get_emb():
     provider = _provider("EMBEDDING")
     url = os.getenv("EMBEDDING_URL")
     model = os.getenv("EMBEDDING_MODEL")
     print(f"embeddings: provider={provider} model={model} url={url}", file=sys.stderr)
+    if provider == "fake":
+        return FakeEmbeddings()
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
         # check_embedding_ctx_length=False sends raw strings, not token arrays —

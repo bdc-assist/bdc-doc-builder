@@ -164,6 +164,30 @@ def test_reset_remote_checks_the_server_before_dropping_anything():
     assert calls == ["/ingest/lookup"], calls
 
 
+def test_fake_embedding_provider_is_offline_deterministic_and_named():
+    """EMBEDDING_MODEL_PROVIDER=fake: hash vectors for tests and the fixture rehearsal. Named, so an
+    embed_hash made with it never matches one made with a real model (switching re-embeds)."""
+    import os
+
+    from r_doc_builder import config
+
+    saved = os.environ.get("EMBEDDING_MODEL_PROVIDER")
+    os.environ["EMBEDDING_MODEL_PROVIDER"] = "fake"
+    config.get_emb.cache_clear()
+    try:
+        with redirect_stderr(io.StringIO()):
+            emb = config.get_emb()
+        assert emb.model == "fake"
+        assert emb.embed_documents(["a", "b"]) == [emb.embed_query("a"), emb.embed_query("b")]
+        assert emb.embed_query("a") != emb.embed_query("b") and len(emb.embed_query("a")) == 32
+    finally:
+        if saved is None:
+            os.environ.pop("EMBEDDING_MODEL_PROVIDER", None)
+        else:
+            os.environ["EMBEDDING_MODEL_PROVIDER"] = saved
+        config.get_emb.cache_clear()
+
+
 def test_reset_remote_drops_the_collection_on_a_current_server():
     calls, original = [], ingest._api_post
     ingest._api_post = lambda path, payload: calls.append((path, payload)) or {}
@@ -560,6 +584,7 @@ if __name__ == "__main__":
     test_the_same_file_listed_twice_is_pushed_once()
     test_reset_remote_checks_the_server_before_dropping_anything()
     test_reset_remote_drops_the_collection_on_a_current_server()
+    test_fake_embedding_provider_is_offline_deterministic_and_named()
     test_files_without_chunks_are_skipped()
     test_lookup_is_split_into_push_batch_sized_requests()
     test_api_post_retries_dropped_connections_but_not_http_errors()
