@@ -235,8 +235,7 @@ for the embedding endpoint.
                 ("How do I upload my own data to BDC?", {})]
    for q, extra in questions:
        hits = requests.post(f"{base}/search", json={"query": q, **extra}).json()
-       print(q, [h["metadata"].get("source") for h in hits], sep="
-  ")
+       print(q, [h["metadata"].get("source") for h in hits], sep="\n  ")
    ```
 
    Run it against each server into a file and compare:
