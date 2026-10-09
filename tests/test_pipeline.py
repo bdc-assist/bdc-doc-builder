@@ -566,6 +566,64 @@ def test_load_transcripts_reads_yaml_list():
         assert doc["metadata"]["title"] == "Vid" and doc["chunks"][0]["start_seconds"] == 1.0
 
 
+def test_fixture_corpus_builds_every_doc_type_offline():
+    """examples/fixture (fake, BDC-shaped) builds offline into all seven doc_types with the metadata
+    shapes real BDC data has, and extras.yaml adds the shapes only networked sources produce. Guards the
+    corpus the fixture rehearsal and the e2e test push."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fixture_corpus import DOC_TYPES, FIXTURE, write_extras
+
+    def offline(url, **opts):
+        raise RuntimeError("offline")  # the transcripts source asks yt-dlp for a video's title and date
+
+    original = sources._ytdl
+    sources._ytdl = offline
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            with redirect_stderr(io.StringIO()):
+                paths = pipeline.build(_args(yaml=str(FIXTURE / "sources.yaml"), data_dir=d, no_contextualize=True))
+            recs = {}
+            for path in paths:
+                with open(path, "rb") as f:
+                    recs[path.stem] = pickle.load(f)
+            with open(write_extras(d), "rb") as f:
+                extras = pickle.load(f)
+    finally:
+        sources._ytdl = original
+
+    def keys(rows):
+        return set().union(*(r["metadata"] for r in rows))
+
+    assert set(recs) == DOC_TYPES, sorted(recs)
+    assert all(r["metadata"]["doc_type"] == t for t, rows in recs.items() for r in rows)
+    assert "hierarchy" in keys(recs["docs"]) and "title" not in keys(recs["docs"])
+    for t in ("page", "fellow", "faq"):
+        assert "title" in keys(recs[t]), t
+    for t in ("event", "update"):
+        assert all({"title", "date", "date_num"} <= set(r["metadata"]) for r in recs[t]), t
+    assert {"start_seconds", "timestamp_url"} <= keys(recs["video"])
+    assert any(r["metadata"]["start_seconds"] > 0 for r in recs["video"]), "a transcript long enough for two chunks"
+    assert len(recs["docs"]) > len({r["metadata"]["source"] for r in recs["docs"]}), "a section long enough to split"
+    owners = {}
+    for t, rows in recs.items():
+        for r in rows:
+            owners.setdefault((r["metadata"]["source"], r["metadata"]["page_url"]), set()).add(t)
+    assert all(len(ts) == 1 for ts in owners.values()), "no document in two doc_types: ingest refuses that"
+    assert {"category", "folder", "title", "date", "date_num", "start_seconds", "timestamp_url"} <= keys(extras)
+    assert any(r["metadata"].get("start_seconds") == 12.345 for r in extras), "a float float32 can't hold exactly"
+    assert not {(r["metadata"]["source"], r["metadata"]["page_url"]) for r in extras} & set(owners), \
+        "extras never share a document with the built files"
+
+    with tempfile.TemporaryDirectory() as d:
+        unquoted = Path(d) / "extras.yaml"
+        unquoted.write_text("- content: c\n  metadata: {source: s, date: 2025-05-14}\n", encoding="utf-8")
+        try:
+            write_extras(d, unquoted)
+            raise AssertionError("an unquoted date must be refused, not silently dropped at push time")
+        except ValueError as e:
+            assert "quote dates" in str(e), e
+
+
 def test_build_warns_on_a_source_with_no_documents():
     """A row that loads nothing (wrong git subdir, JS-only page, scanned PDF) is warned like a row
     that fails; it used to pass with only a progress line while the build carried on without it."""
@@ -707,6 +765,7 @@ if __name__ == "__main__":
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
     test_build_warns_on_a_source_with_no_documents()
+    test_fixture_corpus_builds_every_doc_type_offline()
     test_build_reuses_context_of_unchanged_documents()
     test_context_reuse_misses_when_prompt_or_model_changes()
     test_unreadable_previous_pkl_is_warned_and_ignored()

@@ -1,0 +1,6 @@
+# Fake videos: made-up YouTube ids, local SRT transcripts (paths relative to this file). yt-dlp can't find
+# these videos, so built chunks carry no title/date (the build warns); extras.yaml carries those shapes.
+- video_url: https://www.youtube.com/watch?v=fixtVideo01
+  transcript: transcripts/intro-to-the-platform.srt
+- video_url: https://www.youtube.com/watch?v=fixtVideo02
+  transcript: transcripts/pic-sure-walkthrough.srt

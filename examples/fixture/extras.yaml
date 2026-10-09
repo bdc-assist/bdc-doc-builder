@@ -1,0 +1,41 @@
+# Ready-made rows, in the pipeline's .pkl shape ({content, metadata}), for the metadata only networked
+# sources produce: Freshdesk FAQ category/folder and YouTube title/date. tests/fixture_corpus.py writes them
+# to extras.pkl at test time (YAML, not a committed pickle: reviewable, and loading a pickle runs code).
+# Quote dates: an unquoted YAML date loads as a date object, and a push drops non-scalar metadata.
+# Sources differ from every built document, so pushing extras.pkl next to the built files is never refused.
+- content: To request access to a controlled study, submit a data access request for it, then link your approval to your platform account. Access appears within a day of the link.
+  metadata:
+    source: https://fixture.freshdesk.com/support/solutions/articles/1001
+    page_url: https://fixture.freshdesk.com/support/solutions/articles/1001
+    doc_type: faq
+    title: How do I request access to a controlled study?
+    category: Accessing data
+    folder: Data access
+- content: Workflows that fail with an out-of-memory error need a larger machine type. Raise the memory in the workflow configuration and run it again.
+  metadata:
+    source: https://fixture.freshdesk.com/support/solutions/articles/1002
+    page_url: https://fixture.freshdesk.com/support/solutions/articles/1002
+    doc_type: faq
+    title: Why did my workflow run out of memory?
+    category: Running analyses
+    folder: Workflows
+- content: In this part of the webinar we open a workspace, start a notebook and load the cohort we exported from PIC-SURE.
+  metadata:
+    source: https://www.youtube.com/watch?v=fixtVideo03
+    page_url: https://www.youtube.com/watch?v=fixtVideo03
+    doc_type: video
+    title: Running your first notebook
+    date: "2025-05-14"
+    date_num: 20250514
+    start_seconds: 12.345
+    timestamp_url: https://youtu.be/fixtVideo03?t=12
+- content: Next we plot systolic blood pressure by smoking status and save the figure to the workspace bucket.
+  metadata:
+    source: https://www.youtube.com/watch?v=fixtVideo03
+    page_url: https://www.youtube.com/watch?v=fixtVideo03
+    doc_type: video
+    title: Running your first notebook
+    date: "2025-05-14"
+    date_num: 20250514
+    start_seconds: 97.5
+    timestamp_url: https://youtu.be/fixtVideo03?t=97

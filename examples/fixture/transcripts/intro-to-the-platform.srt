@@ -1,0 +1,19 @@
+1
+00:00:00,000 --> 00:00:04,500
+Welcome to this short introduction to the platform.
+
+2
+00:00:04,500 --> 00:00:10,200
+In the next few minutes we will sign in, open a workspace and look at the data explorer.
+
+3
+00:00:10,200 --> 00:00:16,800
+After signing in with your institutional login, the dashboard lists your workspaces.
+
+4
+00:00:16,800 --> 00:00:23,100
+Every workspace needs a billing project, which pays for compute and storage.
+
+5
+00:00:23,100 --> 00:00:29,400
+From the data explorer you can filter files by study and export a manifest to your workspace.

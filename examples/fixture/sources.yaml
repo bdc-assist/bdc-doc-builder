@@ -1,0 +1,12 @@
+# A fake, BDC-shaped corpus: every doc_type and metadata shape the real BDC sources produce, built offline.
+# The text is invented. Used by tests/test_pipeline.py, tests/test_e2e.py and the fixture rehearsal
+# (tests/test_fixture_cli.py); r-doc-mcp's examples/fixture/doc_types.yaml declares these doc_types.
+# File names are unique across the folders: a path source's `source` is the path inside its folder,
+# so docs/index.md and pages/index.md would be one document in two files, which ingest refuses.
+- {source_type: path, doc_type: docs, link: docs}
+- {source_type: path, doc_type: page, link: pages}
+- {source_type: path, doc_type: update, link: updates}
+- {source_type: path, doc_type: event, link: events}
+- {source_type: path, doc_type: fellow, link: fellows}
+- {source_type: path, doc_type: faq, link: faq}
+- {source_type: transcripts, doc_type: video, link: videos.yaml}   # made-up YouTube ids, local SRT files
