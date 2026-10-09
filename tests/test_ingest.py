@@ -388,7 +388,7 @@ def test_main_build_runs_pipeline_then_reset_then_push():
     originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
     pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or [Path("data/docs.pkl")]
     ingest.reset_remote = lambda: calls.append(("reset",))
-    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False: calls.append(("push", [str(p) for p in paths])) or 0
+    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False: calls.append(("push", [str(p) for p in paths])) or 0
     try:
         ingest.main(["--build", "--sources", "docs", "--no-contextualize", "--reset", "extra.md"])
     finally:
@@ -396,6 +396,37 @@ def test_main_build_runs_pipeline_then_reset_then_push():
 
     assert calls == [("build", ["docs"], True), ("reset",), ("push", [str(Path("data/docs.pkl")), "extra.md"])], \
         "pipeline args pass through; build before reset (a failed build must not empty the DB); push built + given"
+
+
+def test_dry_run_reports_and_writes_nothing():
+    server, emb = FakeServer(), CountingEmb()
+    _push(server, emb, [_row("one", title="T"), _row("two"), _row("three")])
+    before, server.calls = {k: dict(v) for k, v in server.rows.items()}, []
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert _push(server, emb, [_row("one", title="T2"), _row("two 2")], dry_run=True) == 0
+    assert emb.texts == 3, "a dry run embeds nothing"
+    assert server.writes() == [] and server.rows == before, "and writes nothing"
+    text = out.getvalue()
+    assert "1 to embed, 1 to update, 0 unchanged, 2 to delete" in text, text
+    assert "would delete 2 chunks of doc.md" in text, text
+
+
+def test_main_dry_run_passes_through_and_refuses_reset():
+    seen = []
+    original = ingest.ingest_paths
+    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False: seen.append(dry_run) or 0
+    try:
+        ingest.main(["x.pkl", "--dry-run"])
+    finally:
+        ingest.ingest_paths = original
+    assert seen == [True]
+    try:
+        with redirect_stderr(io.StringIO()):
+            ingest.main(["x.pkl", "--dry-run", "--reset"])
+        raise AssertionError("--dry-run --reset must be refused")
+    except SystemExit as e:
+        assert e.code == 2
 
 
 def test_main_requires_paths_or_build():
@@ -424,6 +455,8 @@ if __name__ == "__main__":
     test_changed_embedded_text_or_model_reembeds()
     test_chunks_a_document_dropped_are_deleted_and_nothing_else()
     test_killed_push_resumes_without_reembedding_what_was_stored()
+    test_dry_run_reports_and_writes_nothing()
+    test_main_dry_run_passes_through_and_refuses_reset()
     test_main_build_runs_pipeline_then_reset_then_push()
     test_main_requires_paths_or_build()
     print("ingest self-check passed")

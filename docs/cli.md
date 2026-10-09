@@ -19,7 +19,7 @@ All commands run from the repo root with `uv run`.
 ## `python -m r_doc_builder.ingest`
 
 ```text
-uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize]
+uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize] [--dry-run]
         [--build [--yaml F] [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]]
 ```
 
@@ -33,6 +33,7 @@ required.
 | `--doc-type T` | `doc_type` metadata for every chunk pushed in this run. Default: whatever each record carries. |
 | `--reset` | Drop the remote collection before pushing. Runs after `--build` finishes, so a failed build leaves the DB untouched. |
 | `--summarize` | For `.pkl` records with no contextualized chunk, embed an LLM summary of the content instead of the raw content. One LLM call per record. |
+| `--dry-run` | Report what the push would embed, update and delete (and which sources would lose chunks), then stop: nothing embedded, nothing written. Not with `--reset`. With `--build` the pipeline still runs and writes its `.pkl` files. |
 | `--build` | Run the preprocessing pipeline before pushing. The options below are passed through to it. |
 | `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
 | `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
@@ -47,6 +48,12 @@ without one.
 Don't combine `--doc-type` with `--build --sources all`: it would label every source the same.
 
 ### Examples
+
+See what a push would change before doing it:
+
+```bash
+uv run python -m r_doc_builder.ingest data/bdc/ --dry-run
+```
 
 Rebuild the database from scratch:
 

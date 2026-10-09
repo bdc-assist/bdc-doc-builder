@@ -3,6 +3,7 @@ import hashlib
 import pickle
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -192,11 +193,12 @@ def _with_removals(meta, old):
     return {**meta, **{k: None for k in old.keys() - meta.keys()}}
 
 
-def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) -> int:
+def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, dry_run: bool = False) -> int:
     """Load, embed, and push all supported files under the given paths, embedding only what the DB
     doesn't hold yet: unchanged chunks are skipped, metadata-only changes updated in place, and
     chunks a pushed document no longer produces deleted. doc_type, when given, applies to every
     chunk; otherwise records keep the doc_type they carry (none for ad-hoc files).
+    dry_run: report what each file would cost, then move on: no embedding, no writes.
     Returns the number of chunks embedded."""
     emb = get_emb()
     model = getattr(emb, "model", None) or ""
@@ -215,6 +217,10 @@ def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) 
         embed, update, stale = _plan(ids, metas, stored)
         print(f"{f}: {len(embed)} to embed, {len(update)} to update, "
               f"{len(ids) - len(embed) - len(update)} unchanged, {len(stale)} to delete")
+        if dry_run:
+            for source, n in sorted(Counter(stored[cid].get("source") for cid in stale).items()):
+                print(f"  would delete {n} chunks of {source}")
+            continue
         _post_batches("/ingest/update", [{"id": ids[i], "metadata": _with_removals(metas[i], stored[ids[i]])}
                                          for i in update])
         # each slice is stored before the next is embedded: a killed run loses at most one slice,
@@ -241,6 +247,8 @@ def main(argv=None):
     parser.add_argument("--reset", action="store_true", help="drop the remote collection before pushing")
     parser.add_argument("--summarize", action="store_true",
                         help="embed an LLM summary for .pkl records lacking a contextualized chunk")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report what the push would embed, update and delete, then stop: no embedding, no writes")
     build = parser.add_argument_group(
         "build from source",
         "--build runs pipeline first and pushes what it wrote; the other options here pass through to it")
@@ -249,12 +257,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.paths and not args.build:
         parser.error("nothing to do: give paths to push, or --build to preprocess the sources first")
+    if args.dry_run and args.reset:
+        parser.error("--dry-run can't be combined with --reset")
 
     built = pipeline.build(args) if args.build else []  # before --reset: a failed build must not empty the DB
     if args.reset:
         reset_remote()
-    total = ingest_paths(built + args.paths, args.doc_type, args.summarize)
-    print(f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
+    total = ingest_paths(built + args.paths, args.doc_type, args.summarize, args.dry_run)
+    print("dry run: nothing embedded or written" if args.dry_run
+          else f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
 
 
 if __name__ == "__main__":
