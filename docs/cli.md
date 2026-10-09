@@ -180,6 +180,66 @@ Chunk size and overlap, the HTML tags to drop and to read, and the caption langu
 environment variables: they shape the built corpus, so they live in `<CONFIG_DIR>/build.yaml`
 with the rest of the project's setup. Rebuild with `--reset` after changing them.
 
+## Rehearsal and rollout
+
+Pushes change the database in place. Before the first push with a new version of this tool to a
+database that matters, rehearse on a copy. The commands use the BDC config; r-doc-mcp commands run
+in that repo, ingest commands in this one, each with its own `.env` for the embedding endpoint.
+
+1. **Copy the database** (production `DB_PATH`, e.g. `kubectl cp` from the pod) to `./rehearsal-db`,
+   and keep a second copy `./before-db` for step 6. Serve the first:
+
+   ```bash
+   DB_PATH=./rehearsal-db CONFIG_DIR=examples/bdc INGEST_TOKEN=rehearse uv run uvicorn r_doc_mcp.api:app --port 8100
+   ```
+
+2. **Dry run**: on the first run after upgrading, expect every chunk "to embed" (no `embed_hash`
+   stored yet) and nothing to delete.
+
+   ```bash
+   DOC_MCP_URL=http://127.0.0.1:8100 INGEST_TOKEN=rehearse CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.ingest data/bdc/ --dry-run
+   ```
+
+3. **Push, then push again** (same command without `--dry-run`, twice). The second run must print
+   `0 to embed, 0 to update, ... 0 to delete` for every file.
+4. **Compare with a fresh push**: serve an empty `./oracle-db` on port 8101 the same way, push the
+   same `.pkl` files to it, stop both servers, then in r-doc-mcp:
+
+   ```bash
+   uv run python tests/compare_db.py ./rehearsal-db ./oracle-db --collection bdc --atol 1e-4
+   ```
+
+   Expect `same`. (`--atol`: a real embedding endpoint can differ in the last float digits.)
+5. **Kill a run**: edit a few pages in a source clone, rebuild (`--build --sources <type>`), start the
+   push and stop it part-way (Ctrl-C, or drop the port-forward), rerun it, then repeat step 4.
+6. **Same answers**: serve `./before-db` on port 8099 (and `./rehearsal-db` on 8100), then:
+
+   ```bash
+   uv run python - <<'EOF'
+   import requests
+   questions = [("What is PIC-SURE and what can I do with it in BDC?", {}),
+                ("Whats the difference between picsure open access and authorized access?", {"mode": "keyword"}),
+                ("What are the latest BDC events, and are any more coming up?", {"date_from": "2025-01-01"}),
+                ("How do I upload my own data to BDC?", {})]
+   for q, extra in questions:
+       before, after = ([h["metadata"].get("source") for h in requests.post(f"http://127.0.0.1:{port}/search",
+                         json={"query": q, **extra}).json()] for port in (8099, 8100))
+       print("same     " if before == after else "DIFFERENT", q, before, after, sep="\n  ")
+   EOF
+   ```
+
+   Expect `same` for all four: the content didn't change, so neither should the results.
+
+Then production:
+
+1. **Back up** the database directory (or snapshot its volume). That backup is the rollback.
+2. Deploy r-doc-mcp first; `/health` must show the same document count as before.
+3. Run the push with `--dry-run` against production and read the counts and the sources that would
+   lose chunks.
+4. Push. Check `/health` and the step-6 questions against production.
+5. Keep the backup until the next refresh has succeeded. To roll back, restore the directory.
+   The previous ingest version still works against the new r-doc-mcp (its endpoints are additive).
+
 ## Troubleshooting
 
 - **`POST .../ingest/upsert -> 401`**: `INGEST_TOKEN` differs between the two repos.
