@@ -9,7 +9,7 @@ failures. After every round:
 Needs the r-doc-mcp repo next to this one (or DOC_MCP_DIR) with `uv sync` done; skipped otherwise.
 No network: the LLM and the embedder are fakes, and the server runs on a free local port.
 
-    uv run python tests/test_e2e.py                      # 12 rounds, fixed seed, about 2 minutes
+    uv run python tests/test_e2e.py                      # 12 rounds, fixed seed, about 80 s
     E2E_ROUNDS=60 E2E_SEED=7 uv run python tests/test_e2e.py
 """
 import argparse
@@ -35,6 +35,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))  # not installed: package sits at the repo root
 
 from r_doc_builder import ingest, pipeline, sources
+from fixture_corpus import write_extras
 
 MCP_DIR = Path(os.getenv("DOC_MCP_DIR") or REPO.parent / "bdc-doc-mcp")
 TOKEN, COLLECTION = "e2e-token", "e2e"
@@ -66,11 +67,12 @@ def _free_port():
 
 
 @contextlib.contextmanager
-def server(python, db_dir):
-    """r-doc-mcp's API on db_dir, with ingest pointed at it for the duration."""
+def server(python, db_dir, **overrides):
+    """r-doc-mcp's API on db_dir, with ingest pointed at it for the duration; yields its URL.
+    overrides: more server environment (another CONFIG_DIR, COLLECTION_NAME, EMBEDDING_MODEL_PROVIDER)."""
     port = _free_port()
     env = {**os.environ, "DB_PATH": str(db_dir), "COLLECTION_NAME": COLLECTION, "INGEST_TOKEN": TOKEN,
-           "CONFIG_DIR": "config"}
+           "CONFIG_DIR": "config", **overrides}
     proc = subprocess.Popen([python, "-m", "uvicorn", "r_doc_mcp.api:app", "--port", str(port)],
                             cwd=MCP_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     url, saved = f"http://127.0.0.1:{port}", (ingest.DOC_MCP_URL, ingest.INGEST_TOKEN)
@@ -86,7 +88,7 @@ def server(python, db_dir):
         else:
             raise RuntimeError("r-doc-mcp did not start within 30s")
         ingest.DOC_MCP_URL, ingest.INGEST_TOKEN = url, TOKEN
-        yield
+        yield url
     finally:
         ingest.DOC_MCP_URL, ingest.INGEST_TOKEN = saved
         proc.terminate()  # safe: chroma persists every request
@@ -133,7 +135,8 @@ class ApiSpy:
 
 class Workspace:
     """A small corpus on disk: markdown docs mapped to doc_types by sources.yaml, an ad-hoc folder
-    pushed with --doc-type, and a hand-made .pkl whose metadata has every scalar type."""
+    pushed with --doc-type, and the fixture corpus's extras.pkl: real BDC shapes the markdown can't make
+    (faq category/folder, video title/date, a start_seconds float32 can't hold exactly)."""
 
     def __init__(self, root, rng):
         self.root, self.rng, self.next_part = Path(root), rng, 0
@@ -150,12 +153,7 @@ class Workspace:
         self.write_sources()
         for n in range(2):
             (self.adhoc / f"note{n}.md").write_text(f"# Note {n}\n{self.paragraph()}", encoding="utf-8")
-        self.typed = self.root / "typed.pkl"
-        with open(self.typed, "wb") as f:
-            pickle.dump([{"content": f"typed record {n}",
-                          "metadata": {"source": "typed", "page_url": "typed", "doc_type": "data",
-                                       "n": n, "ratio": n / 4, "whole": 2.0, "flag": n % 2 == 0}}
-                         for n in range(3)], f)
+        self.extras = write_extras(self.root)
 
     def paragraph(self):
         rng = self.rng
@@ -270,7 +268,7 @@ def _round(ws, kind, fault, state, python, llm_calls):
     elif partial:
         pushes = [(built, None)]
     else:
-        pushes = [(built + [ws.typed], None)] + adhoc
+        pushes = [(built + [ws.extras], None)] + adhoc
     ids, texts, pushed = _records(pushes)
 
     emb, spy = FakeEmb(state["model"]), ApiSpy()
@@ -326,7 +324,7 @@ def _round(ws, kind, fault, state, python, llm_calls):
     oracle = Path(tempfile.mkdtemp(dir=ws.root, prefix="oracle_"))
     ingest.get_emb = lambda: FakeEmb(state["model"])
     with server(python, oracle):
-        for paths, doc_type in [(sorted(snap.glob("*.pkl")) + [ws.typed], None)] + adhoc:
+        for paths, doc_type in [(sorted(snap.glob("*.pkl")) + [ws.extras], None)] + adhoc:
             ingest.ingest_paths(paths, doc_type)
     out = subprocess.run([python, str(MCP_DIR / "tests" / "compare_db.py"), str(ws.root / "inc"), str(oracle),
                           "--collection", COLLECTION], cwd=MCP_DIR, capture_output=True, text=True)
