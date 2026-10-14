@@ -21,7 +21,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tqdm import tqdm
 
 from .config import (CHUNK_OVERLAP, CHUNK_SIZE, HTML_DROP_TAGS, HTML_MAIN_TAGS, REPOS_DIR, REQUEST_TIMEOUT,
-                     USER_AGENT, YOUTUBE_LANG)
+                     USER_AGENT, YOUTUBE_FORCE_IPV4, YOUTUBE_LANG)
 
 SUPPORTED = {".md", ".mdx", ".txt", ".pdf"}
 
@@ -254,6 +254,8 @@ def is_youtube(link):
 
 def _ytdl(url, **opts):
     import yt_dlp
+    if YOUTUBE_FORCE_IPV4:
+        opts = {"source_address": "0.0.0.0", **opts}
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, **opts}) as ydl:
         return ydl.extract_info(url, download=False)
 
