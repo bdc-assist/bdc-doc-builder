@@ -1,4 +1,6 @@
 """LLM chunk contextualizer (Anthropic-style contextual retrieval) and summarizer."""
+import hashlib
+import os
 import time
 
 import yaml
@@ -43,6 +45,15 @@ def contextualize_chunk(chunk_content, whole_document):
     if context_text is None:
         return chunk_content
     return f"{context_text} {chunk_content}"
+
+
+def context_hash(doc_text):
+    """Fingerprint of what shapes a chunk's context sentence besides the chunk itself: the prompt,
+    the completion model and the part of the document the LLM is shown. The pipeline reuses a
+    sentence only while this and the chunk text are unchanged."""
+    key = "\n".join((PROMPTS["contextualize_chunk"], os.getenv("COMPLETION_MODEL", ""),
+                     str(doc_text)[:CONTEXT_CHAR_LIMIT]))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def get_summary(text, min_text=SUMMARY_MIN_CHARS):

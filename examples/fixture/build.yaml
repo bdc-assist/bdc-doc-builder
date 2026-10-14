@@ -1,0 +1,10 @@
+# How this project's sources become chunks, read once by r_doc_builder/config.py
+# (<CONFIG_DIR>/build.yaml, default config/build.yaml). Kept here rather than in .env so the
+# same CONFIG_DIR always builds the same corpus. Editing any of these changes the built
+# chunks: rebuild and re-push (ingest --build --reset) afterwards.
+
+chunk_size: 1500     # characters per chunk for text, pdf, html and transcripts; longer markdown sections are split to it
+chunk_overlap: 200   # characters shared by neighbouring chunks
+html_drop_tags: [script, style, nav, header, footer, noscript]  # removed from a web page before reading it
+html_main_tags: [main, article, body]  # the first of these the page has holds its text
+youtube_lang: en     # preferred caption language for youtube sources

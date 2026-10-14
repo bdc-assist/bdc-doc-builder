@@ -1,0 +1,75 @@
+1
+00:00:00,000 --> 00:00:05,000
+In this walkthrough we build a cohort in PIC-SURE from start to finish.
+
+2
+00:00:05,000 --> 00:00:11,500
+First we search for a concept, blood pressure, and look at the variables each study offers for it.
+
+3
+00:00:11,500 --> 00:00:18,000
+Each result shows the study, the variable name and how many participants have a value for it.
+
+4
+00:00:18,000 --> 00:00:24,500
+We add systolic blood pressure as a filter and drag the range slider to keep values above one forty.
+
+5
+00:00:24,500 --> 00:00:31,000
+The participant count at the top updates straight away, so we can see the effect of every filter.
+
+6
+00:00:31,000 --> 00:00:37,500
+Next we add a categorical filter for smoking status and tick the current and former smoker values.
+
+7
+00:00:37,500 --> 00:00:44,000
+Filters combine with AND by default, so the cohort shrinks with each filter we add to it.
+
+8
+00:00:44,000 --> 00:00:50,500
+To combine filters with OR instead, we drag one filter onto another and they become a group.
+
+9
+00:00:50,500 --> 00:00:57,000
+Groups can be nested two levels deep, which covers most of the cohort definitions we see in practice.
+
+10
+00:00:57,000 --> 00:01:01,500
+Now the cohort looks right, so we save it before doing anything else with it.
+
+11
+00:01:01,500 --> 00:01:08,000
+Unsaved filters are cleared when you sign out, which is the most common way people lose a cohort.
+
+12
+00:01:08,000 --> 00:01:14,500
+With the cohort saved, we open the export tab and pick the variables to include in the dataset.
+
+13
+00:01:14,500 --> 00:01:21,000
+We choose the workspace to export into; it needs a billing project, or the export will fail.
+
+14
+00:01:21,000 --> 00:01:27,500
+Large exports run in the background, and an email arrives when the dataset is ready, usually within ten minutes.
+
+15
+00:01:27,500 --> 00:01:34,000
+The exported dataset is named after the date and the cohort, so it is easy to find in the workspace.
+
+16
+00:01:34,000 --> 00:01:40,500
+Remember that authorized access exports only include the studies you are approved for.
+
+17
+00:01:40,500 --> 00:01:47,000
+That is why the participant count can drop between the open access view and the exported dataset.
+
+18
+00:01:47,000 --> 00:01:53,500
+To change the cohort later, reopen it from the saved cohorts list, edit the filters and export again.
+
+19
+00:01:53,500 --> 00:02:00,000
+That is the whole cycle: search, filter, save, export, and analyze the dataset in your workspace.

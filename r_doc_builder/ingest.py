@@ -1,7 +1,10 @@
 import argparse
+import hashlib
 import pickle
+import sys
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -33,6 +36,8 @@ def load_pkl(path: Path, doc_type: str | None = None, use_summary: bool = False)
             meta["doc_type"] = doc_type
         meta.setdefault("source", str(path.name))
         embed_text = meta.get("contextualized_chunk") or meta.get("text_to_embed")
+        # ponytail: summaries are made before ingest_paths asks the DB what it holds, and differ every
+        # run, so --summarize records are re-summarized and re-embedded on every push
         if not embed_text and use_summary:
             from .contextualize import get_summary
             embed_text = meta["summary"] = get_summary(row["content"])
@@ -99,7 +104,7 @@ def _embed_batched(emb, texts, desc="embedding"):
     gateways); a whole file at once blows that. Budget is estimated at ~4 chars/token."""
     budget = EMBEDDING_BATCH_TOKENS * 4
     vectors, batch, batch_chars = [], [], 0
-    with tqdm(total=len(texts), desc=desc) as pbar:
+    with tqdm(total=len(texts), desc=desc, disable=desc is None) as pbar:
         for text in texts:
             text = text[:budget]  # a single oversized chunk still has to fit one request
             if batch and batch_chars + len(text) > budget:
@@ -119,49 +124,128 @@ def _embed_batched(emb, texts, desc="embedding"):
 # --- push client: r-doc-mcp owns the DB; we only talk to its ingest API ---
 
 def _api_post(path, payload):
+    """kubectl port-forward drops (see _embed_with_retry) hit the ingest API too: retry connection
+    errors, connections dropped mid-body and timeouts with the same backoff. Every ingest endpoint is idempotent, so a retried
+    request is safe. An HTTP error (bad token, server bug) is an answer, not a dropped tunnel:
+    raise it at once."""
     url = DOC_MCP_URL + path
-    resp = requests.post(url, json=payload, timeout=PUSH_TIMEOUT,
-                         headers={"Authorization": f"Bearer {INGEST_TOKEN}"})
+    for attempt in range(RETRIES):
+        try:
+            resp = requests.post(url, json=payload, timeout=PUSH_TIMEOUT,
+                                 headers={"Authorization": f"Bearer {INGEST_TOKEN}"})
+            break
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+            if attempt == RETRIES - 1:
+                raise
+            print(f"  ingest API call failed ({type(e).__name__}); retrying in {2 ** attempt}s")
+            time.sleep(2 ** attempt)
     if not resp.ok:
         raise RuntimeError(f"POST {url} -> {resp.status_code}: {resp.text[:300]}")
     return resp.json()
 
 
 def reset_remote():
-    """Drop the server-side collection so the next push starts empty."""
+    """Drop the server-side collection so the next push starts empty. An r-doc-mcp older than this
+    push client 404s on /ingest/lookup: ask it first, so a mismatch stops the run before the DB is
+    dropped and a push that cannot work follows."""
+    _api_post("/ingest/lookup", {"sources": []})
     print("resetting remote collection")
     _api_post("/ingest/reset", None)
 
 
-def push_chunks(ids, contents, embeddings, metas, desc="pushing"):
-    """Upsert chunks to r-doc-mcp in request-sized batches (embeddings are fat)."""
-    batch = PUSH_BATCH
-    for i in tqdm(range(0, len(ids), batch), desc=desc):
-        _api_post("/ingest/upsert", [
-            {"id": cid, "content": content, "embedding": emb, "metadata": meta}
-            for cid, content, emb, meta in zip(ids[i:i + batch], contents[i:i + batch],
-                                              embeddings[i:i + batch], metas[i:i + batch])
-        ])
+def _post_batches(path, rows):
+    """POST rows to the ingest API in PUSH_BATCH-sized requests (embeddings are fat)."""
+    for i in range(0, len(rows), PUSH_BATCH):
+        _api_post(path, rows[i:i + PUSH_BATCH])
 
 
-def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False) -> int:
-    """Load, embed, and push all supported files under the given paths.
-    doc_type, when given, applies to every chunk; otherwise records keep the doc_type they
-    carry (none for ad-hoc files)."""
+def push_chunks(ids, contents, embeddings, metas):
+    """Upsert chunks to r-doc-mcp in request-sized batches."""
+    _post_batches("/ingest/upsert", [{"id": cid, "content": content, "embedding": emb, "metadata": meta}
+                                     for cid, content, emb, meta in zip(ids, contents, embeddings, metas)])
+
+
+def _lookup(metas):
+    """What the DB holds for this file's documents: {id: stored metadata}. Asked by source, then
+    narrowed to the file's (source, page_url) pairs: two documents can share a source (the same
+    relative path in two git repos), and one file's push must never touch the other's chunks."""
+    docs = {(m.get("source"), m.get("page_url")) for m in metas}
+    sources = sorted({s for s, _ in docs})
+    stored = {}
+    for i in range(0, len(sources), PUSH_BATCH):
+        stored.update(_api_post("/ingest/lookup", {"sources": sources[i:i + PUSH_BATCH]}))
+    return {cid: m for cid, m in stored.items() if (m.get("source"), m.get("page_url")) in docs}
+
+
+def _plan(ids, metas, stored):
+    """Diff a file's chunks against what the DB holds for its documents -> (indexes to embed,
+    indexes whose metadata alone changed, stored ids the file no longer produces). A chunk is
+    embedded only when its embed_hash (model + embedded text) differs from the stored one."""
+    embed, update = [], []
+    for i, (cid, meta) in enumerate(zip(ids, metas)):
+        old = stored.get(cid)
+        if old is None or old.get("embed_hash") != meta["embed_hash"]:
+            embed.append(i)
+        elif old != meta:
+            update.append(i)
+    return embed, update, sorted(stored.keys() - set(ids))
+
+
+def _with_removals(meta, old):
+    """Chroma merges metadata into what is stored: a key the new record dropped goes out as None,
+    which deletes it."""
+    return {**meta, **{k: None for k in old.keys() - meta.keys()}}
+
+
+def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, dry_run: bool = False) -> int:
+    """Load, embed, and push all supported files under the given paths, embedding only what the DB
+    doesn't hold yet: unchanged chunks are skipped, metadata-only changes updated in place, and
+    chunks a pushed document no longer produces deleted. doc_type, when given, applies to every
+    chunk; otherwise records keep the doc_type they carry (none for ad-hoc files).
+    dry_run: report what each file would cost, then move on: no embedding, no writes.
+    Returns the number of chunks embedded."""
     emb = get_emb()
+    model = getattr(emb, "model", None) or ""
     total = 0
-    for f in iter_files(paths):
-        if f.suffix == ".pkl":
-            contents, metas, embed_texts = load_pkl(f, doc_type, use_summary)
-        else:
-            contents, metas, embed_texts = load_file(f, doc_type)
+    files = list({f.resolve(): f for f in iter_files(paths)}.values())  # a directory and its file listed twice push once
+    # ponytail: every file's records are held in memory at once; stream per file if a corpus outgrows RAM
+    loaded = [(f, *(load_pkl(f, doc_type, use_summary) if f.suffix == ".pkl" else load_file(f, doc_type)))
+              for f in files]
+    # a document in two files would be diffed against the DB by each file alone, so the later one
+    # would revert the earlier one's version on every push: refuse before anything is written
+    owner = {}
+    for f, _, metas, _ in loaded:
+        for doc in {(m.get("source"), m.get("page_url")) for m in metas}:
+            if owner.setdefault(doc, f) != f:
+                sys.exit(f"document {doc[0]} ({doc[1]}) is in both {owner[doc]} and {f}: probably a stale .pkl "
+                         f"left by a renamed or emptied doc_type; delete the stale file and push again")
+    for f, contents, metas, embed_texts in loaded:
         if not contents:
             continue
-        embeddings = _embed_batched(emb, embed_texts, desc=f"embedding {f.name}")
         ids = _chunk_ids(contents, metas)
-        push_chunks(ids, contents, embeddings, metas, desc=f"pushing {f.name}")
-        total += len(contents)
-        print(f"pushed {len(contents):4d} chunks from {f}")
+        for meta, text in zip(metas, embed_texts):
+            meta["embed_hash"] = hashlib.sha256(f"{model}\n{text}".encode()).hexdigest()[:16]
+        stored = _lookup(metas)
+        embed, update, stale = _plan(ids, metas, stored)
+        print(f"{f}: {len(embed)} to embed, {len(update)} to update, "
+              f"{len(ids) - len(embed) - len(update)} unchanged, {len(stale)} to delete")
+        if dry_run:
+            for source, n in sorted(Counter(stored[cid].get("source") for cid in stale).items()):
+                print(f"  would delete {n} chunks of {source}")
+            continue
+        _post_batches("/ingest/update", [{"id": ids[i], "metadata": _with_removals(metas[i], stored[ids[i]])}
+                                         for i in update])
+        # each slice is stored before the next is embedded: a killed run loses at most one slice,
+        # and the rerun's lookup skips everything already pushed
+        with tqdm(total=len(embed), desc=f"embedding {f.name}", disable=not embed) as bar:
+            for start in range(0, len(embed), PUSH_BATCH):
+                part = embed[start:start + PUSH_BATCH]
+                vectors = _embed_batched(emb, [embed_texts[i] for i in part], desc=None)
+                push_chunks([ids[i] for i in part], [contents[i] for i in part], vectors,
+                            [_with_removals(metas[i], stored.get(ids[i], {})) for i in part])
+                bar.update(len(part))
+        _post_batches("/ingest/delete", stale)  # last: a document never loses chunks before their replacements are in
+        total += len(embed)
     return total
 
 
@@ -175,6 +259,8 @@ def main(argv=None):
     parser.add_argument("--reset", action="store_true", help="drop the remote collection before pushing")
     parser.add_argument("--summarize", action="store_true",
                         help="embed an LLM summary for .pkl records lacking a contextualized chunk")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report what the push would embed, update and delete, then stop: no embedding, no writes")
     build = parser.add_argument_group(
         "build from source",
         "--build runs pipeline first and pushes what it wrote; the other options here pass through to it")
@@ -183,12 +269,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.paths and not args.build:
         parser.error("nothing to do: give paths to push, or --build to preprocess the sources first")
+    if args.dry_run and args.reset:
+        parser.error("--dry-run can't be combined with --reset")
 
     built = pipeline.build(args) if args.build else []  # before --reset: a failed build must not empty the DB
     if args.reset:
         reset_remote()
-    total = ingest_paths(built + args.paths, args.doc_type, args.summarize)
-    print(f"done: pushed {total} chunks to {DOC_MCP_URL}")
+    total = ingest_paths(built + args.paths, args.doc_type, args.summarize, args.dry_run)
+    print("dry run: nothing embedded or written" if args.dry_run
+          else f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
 
 
 if __name__ == "__main__":

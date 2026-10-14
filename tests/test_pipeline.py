@@ -460,10 +460,11 @@ def test_to_records_merges_metadata_and_contextualizes():
     finally:
         pipeline.contextualize_chunk = original
     assert recs[0] == {"content": "c1", "metadata": {"source": "s", "page_url": "u", "date": "2025-01-15", "date_num": 20250115,
-                                                     "doc_type": "docs", "hierarchy": "H", "contextualized_chunk": "ctx(whole) c1"}}
+                                                     "doc_type": "docs", "hierarchy": "H", "contextualized_chunk": "ctx(whole) c1",
+                                                     "context_hash": contextualize.context_hash("whole")}}
     assert "hierarchy" not in recs[1]["metadata"]
     untyped = pipeline.to_records(doc, None, contextualize=False)
-    assert "doc_type" not in untyped[0]["metadata"] and "contextualized_chunk" not in untyped[0]["metadata"]
+    assert "doc_type" not in untyped[0]["metadata"] and "contextualized_chunk" not in untyped[0]["metadata"] and "context_hash" not in untyped[0]["metadata"]
 
 
 def _args(**kw):
@@ -565,6 +566,64 @@ def test_load_transcripts_reads_yaml_list():
         assert doc["metadata"]["title"] == "Vid" and doc["chunks"][0]["start_seconds"] == 1.0
 
 
+def test_fixture_corpus_builds_every_doc_type_offline():
+    """examples/fixture (fake, BDC-shaped) builds offline into all seven doc_types with the metadata
+    shapes real BDC data has, and extras.yaml adds the shapes only networked sources produce. Guards the
+    corpus the fixture rehearsal and the e2e test push."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from fixture_corpus import DOC_TYPES, FIXTURE, write_extras
+
+    def offline(url, **opts):
+        raise RuntimeError("offline")  # the transcripts source asks yt-dlp for a video's title and date
+
+    original = sources._ytdl
+    sources._ytdl = offline
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            with redirect_stderr(io.StringIO()):
+                paths = pipeline.build(_args(yaml=str(FIXTURE / "sources.yaml"), data_dir=d, no_contextualize=True))
+            recs = {}
+            for path in paths:
+                with open(path, "rb") as f:
+                    recs[path.stem] = pickle.load(f)
+            with open(write_extras(d), "rb") as f:
+                extras = pickle.load(f)
+    finally:
+        sources._ytdl = original
+
+    def keys(rows):
+        return set().union(*(r["metadata"] for r in rows))
+
+    assert set(recs) == DOC_TYPES, sorted(recs)
+    assert all(r["metadata"]["doc_type"] == t for t, rows in recs.items() for r in rows)
+    assert "hierarchy" in keys(recs["docs"]) and "title" not in keys(recs["docs"])
+    for t in ("page", "fellow", "faq"):
+        assert "title" in keys(recs[t]), t
+    for t in ("event", "update"):
+        assert all({"title", "date", "date_num"} <= set(r["metadata"]) for r in recs[t]), t
+    assert {"start_seconds", "timestamp_url"} <= keys(recs["video"])
+    assert any(r["metadata"]["start_seconds"] > 0 for r in recs["video"]), "a transcript long enough for two chunks"
+    assert len(recs["docs"]) > len({r["metadata"]["source"] for r in recs["docs"]}), "a section long enough to split"
+    owners = {}
+    for t, rows in recs.items():
+        for r in rows:
+            owners.setdefault((r["metadata"]["source"], r["metadata"]["page_url"]), set()).add(t)
+    assert all(len(ts) == 1 for ts in owners.values()), "no document in two doc_types: ingest refuses that"
+    assert {"category", "folder", "title", "date", "date_num", "start_seconds", "timestamp_url"} <= keys(extras)
+    assert any(r["metadata"].get("start_seconds") == 12.345 for r in extras), "a float float32 can't hold exactly"
+    assert not {(r["metadata"]["source"], r["metadata"]["page_url"]) for r in extras} & set(owners), \
+        "extras never share a document with the built files"
+
+    with tempfile.TemporaryDirectory() as d:
+        unquoted = Path(d) / "extras.yaml"
+        unquoted.write_text("- content: c\n  metadata: {source: s, date: 2025-05-14}\n", encoding="utf-8")
+        try:
+            write_extras(d, unquoted)
+            raise AssertionError("an unquoted date must be refused, not silently dropped at push time")
+        except ValueError as e:
+            assert "quote dates" in str(e), e
+
+
 def test_build_warns_on_a_source_with_no_documents():
     """A row that loads nothing (wrong git subdir, JS-only page, scanned PDF) is warned like a row
     that fails; it used to pass with only a progress line while the build carried on without it."""
@@ -580,6 +639,101 @@ def test_build_warns_on_a_source_with_no_documents():
         # tqdm's bar control codes can precede it on the line
         warnings = [line.split("warning:", 1)[1] for line in err.getvalue().splitlines() if "warning:" in line]
         assert len(warnings) == 1 and "empty" in warnings[0] and "0 documents" in warnings[0], warnings
+
+
+def _contexts(*paths):
+    found = {}
+    for path in paths:
+        with open(path, "rb") as f:
+            found.update({r["content"]: r["metadata"]["contextualized_chunk"] for r in pickle.load(f)})
+    return found
+
+
+def test_build_reuses_context_of_unchanged_documents():
+    """A rebuild calls the LLM only for documents whose text changed and keeps the exact sentence
+    for the rest, so ingest's embed_hash matches and nothing unchanged is re-embedded. The fake LLM
+    never answers the same way twice, like a real one."""
+    calls = []
+    original = pipeline.contextualize_chunk
+    pipeline.contextualize_chunk = lambda chunk, whole: calls.append(chunk) or f"ctx{len(calls)} {chunk}"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            _write(d / "a.md", "# A\nay\n## A2\nay two")
+            _write(d / "b.md", "# B\nbee")
+            _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: a.md}\n"
+                                       "- {source_type: path, doc_type: faq, link: b.md}\n")
+            args = _args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"))
+            out = (d / "out" / "docs.pkl", d / "out" / "faq.pkl")
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert len(calls) == 3
+            first = _contexts(*out)
+
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert calls == [] and _contexts(*out) == first, "nothing changed: no LLM call, the same sentences"
+
+            _write(d / "a.md", "# A\nay\n## A2\nay two, edited")
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert sorted(calls) == ["ay", "ay two, edited"], "an edited document is re-situated whole; b.md is not"
+
+            _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: a.md}\n"
+                                       "- {source_type: path, doc_type: docs, link: b.md}\n")
+            calls.clear()
+            with redirect_stderr(io.StringIO()):
+                pipeline.build(args)
+            assert calls == [], "a source moved to another doc_type keeps its context"
+    finally:
+        pipeline.contextualize_chunk = original
+
+
+def test_context_reuse_misses_when_prompt_or_model_changes():
+    doc = {"text": "whole", "chunks": [{"content": "c1"}], "metadata": {"source": "s", "page_url": "u"}}
+    previous = {("s", "u", "c1", contextualize.context_hash("whole")): "old ctx c1"}
+    original, prompt = pipeline.contextualize_chunk, contextualize.PROMPTS["contextualize_chunk"]
+    saved_model = os.environ.get("COMPLETION_MODEL")
+    pipeline.contextualize_chunk = lambda chunk, whole: f"new ctx {chunk}"
+
+    def context():
+        with redirect_stderr(io.StringIO()):
+            return pipeline.to_records(doc, None, True, previous)[0]["metadata"]["contextualized_chunk"]
+
+    try:
+        assert context() == "old ctx c1"
+        assert contextualize.context_hash("whole") != contextualize.context_hash("whole, edited")
+        contextualize.PROMPTS["contextualize_chunk"] = prompt + " Be brief."
+        assert context() == "new ctx c1", "a new prompt re-situates every chunk"
+        contextualize.PROMPTS["contextualize_chunk"] = prompt
+        os.environ["COMPLETION_MODEL"] = "another-model"
+        assert context() == "new ctx c1", "so does another completion model"
+    finally:
+        pipeline.contextualize_chunk, contextualize.PROMPTS["contextualize_chunk"] = original, prompt
+        if saved_model is None:
+            os.environ.pop("COMPLETION_MODEL", None)
+        else:
+            os.environ["COMPLETION_MODEL"] = saved_model
+
+
+def test_unreadable_previous_pkl_is_warned_and_ignored():
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "docs.pkl").write_bytes(b"not a pickle")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            assert pipeline.previous_contexts(d) == {}
+        assert "warning:" in err.getvalue() and "docs.pkl" in err.getvalue(), err.getvalue()
+
+
+def test_previous_contexts_skips_the_raw_text_fallback_of_a_failed_call():
+    rows = [{"content": "raw", "metadata": {"source": "s", "page_url": "u", "contextualized_chunk": "raw", "context_hash": "h"}},
+            {"content": "real", "metadata": {"source": "s", "page_url": "u", "contextualized_chunk": "ctx real", "context_hash": "h"}}]
+    with tempfile.TemporaryDirectory() as d:
+        with open(Path(d) / "docs.pkl", "wb") as f:
+            pickle.dump(rows, f)
+        assert pipeline.previous_contexts(d) == {("s", "u", "real", "h"): "ctx real"}
 
 
 if __name__ == "__main__":
@@ -611,4 +765,9 @@ if __name__ == "__main__":
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
     test_build_warns_on_a_source_with_no_documents()
+    test_fixture_corpus_builds_every_doc_type_offline()
+    test_build_reuses_context_of_unchanged_documents()
+    test_context_reuse_misses_when_prompt_or_model_changes()
+    test_unreadable_previous_pkl_is_warned_and_ignored()
+    test_previous_contexts_skips_the_raw_text_fallback_of_a_failed_call()
     print("pipeline self-check passed")
