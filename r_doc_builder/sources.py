@@ -20,8 +20,13 @@ from bs4 import BeautifulSoup
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tqdm import tqdm
 
-from .config import (CHUNK_OVERLAP, CHUNK_SIZE, HTML_DROP_TAGS, HTML_MAIN_TAGS, REPOS_DIR, REQUEST_TIMEOUT,
-                     USER_AGENT, YOUTUBE_FORCE_IPV4, YOUTUBE_LANG)
+from .config import (CHUNK_OVERLAP, CHUNK_SIZE, FORCE_IPV4, HTML_DROP_TAGS, HTML_MAIN_TAGS, REPOS_DIR,
+                     REQUEST_TIMEOUT, USER_AGENT, YOUTUBE_LANG)
+
+if FORCE_IPV4:  # urllib3 resolves hosts through this hook: A records only, for requests and yt-dlp alike
+    import socket
+    import urllib3.util.connection
+    urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
 
 SUPPORTED = {".md", ".mdx", ".txt", ".pdf"}
 
@@ -254,7 +259,7 @@ def is_youtube(link):
 
 def _ytdl(url, **opts):
     import yt_dlp
-    if YOUTUBE_FORCE_IPV4:
+    if FORCE_IPV4:  # in case yt-dlp picks a non-urllib3 handler
         opts = {"source_address": "0.0.0.0", **opts}
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True, **opts}) as ydl:
         return ydl.extract_info(url, download=False)
