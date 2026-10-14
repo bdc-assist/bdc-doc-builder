@@ -29,6 +29,8 @@ for _k in ("CHUNK_SIZE", "CHUNK_OVERLAP", "HTML_DROP_TAGS", "HTML_MAIN_TAGS", "Y
 REPOS_DIR = os.getenv("REPOS_DIR", "./data/repos/")  # where git sources are cloned (shared: clones are named by repo)
 # where pipeline writes the .pkl files (--data-dir default): data/<CONFIG_DIR folder name>/, so examples don't overwrite each other
 PREPROC_DATA_DIR = os.getenv("PREPROC_DATA_DIR") or f"./data/{Path(CONFIG_DIR).resolve().name}/"
+# source downloads (requests, yt-dlp) over IPv4 only: for hosts that resolve IPv6 addresses but can't reach them (often WSL2)
+FORCE_IPV4 = os.getenv("FORCE_IPV4", "").strip().lower() in ("1", "true", "yes")
 USER_AGENT = os.getenv("USER_AGENT", "Mozilla/5.0")  # sent with page, freshdesk and transcript downloads
 COMPLETION_TEMPERATURE = float(os.getenv("COMPLETION_TEMPERATURE", "0"))  # every get_llm() provider
 # unset for non-reasoning models (gpt-4o, gpt-4o-mini); none|low|medium|high for reasoning ones

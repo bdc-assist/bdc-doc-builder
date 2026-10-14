@@ -178,6 +178,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 | `COMPLETION_TEMPERATURE` | `--build`, `--summarize` | Sampling temperature of the contextualizer/summarizer LLM (default 0) |
 | `RETRIES` | `--build`, push | Attempts per LLM, embedding or ingest API call before giving up (default 5) |
 | `REQUEST_TIMEOUT` | `--build` | Seconds allowed for one source download: web page, caption track (default 60) |
+| `FORCE_IPV4` | `--build` | `1` makes source downloads (web pages, Freshdesk, transcripts, yt-dlp) connect over IPv4 only. For machines that resolve IPv6 addresses but can't reach them, often WSL2: downloads then hang for minutes in `connect` (check with `curl -6 -m 10 https://www.youtube.com`) |
 | `USER_AGENT` | `--build` | User-Agent sent with web page, Freshdesk and transcript downloads (default `Mozilla/5.0`) |
 | `CONFIG_DIR` | `--build`, `--summarize` | Folder holding `sources.yaml`, `prompts.yaml` and `build.yaml` (default `config`; `examples/bdc` selects the BDC ones) |
 | `REPOS_DIR` | `--build` | Where git sources are cloned (default `./data/repos/`) |
