@@ -102,6 +102,8 @@ def test_provider_selection_and_temperature_reach_every_client():
             llm = config.get_llm()
             assert type(llm).__name__ == cls, (env, type(llm).__name__)
             assert llm.temperature == 0.5, env
+            # no timeout = a dropped response hangs the build forever, retries never fire
+            assert cls == "ChatOllama" or llm.request_timeout == config.COMPLETION_TIMEOUT, env
             assert endpoint is None or getattr(llm, endpoint).rstrip("/") == env["COMPLETION_URL"], env
         os.environ["COMPLETION_MODEL_PROVIDER"] = "bedrock"
         config.get_llm.cache_clear()

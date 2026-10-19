@@ -571,7 +571,37 @@ def test_main_requires_paths_or_build():
         assert e.code == 2
 
 
+def test_azure_embedding_clients():
+    """An azure.com EMBEDDING_URL used to raise Unsupported EMBEDDING_MODEL_PROVIDER: the v1 gateway
+    gets the plain OpenAI client, a resource root the deployments one, both named after the deployment."""
+    import os
+
+    from r_doc_builder import config
+
+    saved = {k: os.environ.get(k) for k in ("EMBEDDING_MODEL_PROVIDER", "EMBEDDING_URL", "EMBEDDING_MODEL",
+                                            "OPENAI_API_KEY")}
+    cases = [("https://res.services.ai.azure.com/openai/v1", "OpenAIEmbeddings", "openai_api_base"),
+             ("https://res.openai.azure.com", "AzureOpenAIEmbeddings", "azure_endpoint")]
+    try:
+        # empty, not unset: an unset provider could be refilled from .env
+        os.environ.update({"EMBEDDING_MODEL_PROVIDER": "", "EMBEDDING_MODEL": "emb-deploy", "OPENAI_API_KEY": "test"})
+        for url, cls, endpoint in cases:
+            os.environ["EMBEDDING_URL"] = url
+            config.get_emb.cache_clear()
+            emb = config.get_emb()
+            assert type(emb).__name__ == cls, (url, type(emb).__name__)
+            assert getattr(emb, endpoint).rstrip("/") == url and emb.model == "emb-deploy", url
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        config.get_emb.cache_clear()
+
+
 if __name__ == "__main__":
+    test_azure_embedding_clients()
     test_ingest_tunables_come_from_config()
     test_batching_respects_token_budget()
     test_oversized_single_text_is_truncated()

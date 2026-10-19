@@ -37,6 +37,8 @@ COMPLETION_TEMPERATURE = float(os.getenv("COMPLETION_TEMPERATURE", "0"))  # ever
 # (gpt-6-luna). See _openai_kwargs. OpenAI-family providers only.
 COMPLETION_REASONING_EFFORT = os.getenv("COMPLETION_REASONING_EFFORT") or None
 RETRIES = int(os.getenv("RETRIES", "5"))  # attempts per LLM / embedding call before giving up
+# seconds one LLM call may take; unset, the openai client waits forever on a dropped response
+COMPLETION_TIMEOUT = int(os.getenv("COMPLETION_TIMEOUT", "120"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))  # one source download (sources.py)
 SUMMARY_MIN_CHARS = int(os.getenv("SUMMARY_MIN_CHARS", "300"))  # ingest --summarize: shorter texts are embedded as-is
 # r-doc-mcp ingest API (ingest.py): where built content is pushed, and how
@@ -101,6 +103,19 @@ def get_emb():
         from langchain_openai import OpenAIEmbeddings
         return OpenAIEmbeddings(base_url=url, model=model, api_key=_self_hosted_key(),
                                 check_embedding_ctx_length=False)
+    azure_key = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if provider == "azure" and url and url.rstrip("/").endswith("/openai/v1"):
+        # Azure's OpenAI-compatible v1 gateway speaks plain OpenAI — the deployments
+        # client would stack its own path on top and 404
+        from langchain_openai import OpenAIEmbeddings
+        return OpenAIEmbeddings(base_url=url, model=model, api_key=azure_key, check_embedding_ctx_length=False)
+    if provider == "azure":
+        # EMBEDDING_MODEL is the *deployment* name, EMBEDDING_URL the resource root; model= too,
+        # so the client's .model names the deployment rather than its ada-002 default
+        from langchain_openai import AzureOpenAIEmbeddings
+        return AzureOpenAIEmbeddings(azure_endpoint=url, azure_deployment=model, model=model, api_key=azure_key,
+                                     api_version=os.getenv("AZURE_API_VERSION", "2024-10-21"),
+                                     check_embedding_ctx_length=False)
     if provider == "ollama":
         from langchain_ollama import OllamaEmbeddings
         return OllamaEmbeddings(base_url=url, model=model)
@@ -115,11 +130,12 @@ def _openai_kwargs() -> dict:
       other   no temperature: a reasoning gpt-6-luna takes only its default. Contextualizing makes
               plain calls, which chat completions serves while reasoning (r-assist's tool calls need
               the Responses API; not here, so replies stay plain strings)."""
+    base = {"timeout": COMPLETION_TIMEOUT}
     if not COMPLETION_REASONING_EFFORT:
-        return {"temperature": COMPLETION_TEMPERATURE}
+        return {**base, "temperature": COMPLETION_TEMPERATURE}
     if COMPLETION_REASONING_EFFORT == "none":
-        return {"temperature": COMPLETION_TEMPERATURE, "reasoning_effort": "none"}
-    return {"reasoning_effort": COMPLETION_REASONING_EFFORT}
+        return {**base, "temperature": COMPLETION_TEMPERATURE, "reasoning_effort": "none"}
+    return {**base, "reasoning_effort": COMPLETION_REASONING_EFFORT}
 
 
 @lru_cache
