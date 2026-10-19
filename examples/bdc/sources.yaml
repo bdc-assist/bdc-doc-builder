@@ -1,23 +1,27 @@
 # NHLBI BioData Catalyst sources. doc_type values are the ones r-doc-mcp's examples/bdc/doc_types.yaml
-# declares. Every original BDC source has a generic type; videos.yaml is the BDC video sheet reduced to two fields.
+# declares. stagecc/bdc-llm (private: clone with your own git credentials) is the Markdown export of the BDC
+# GitBook docs (docs/) and website (site/), regenerated from stagecc/bdc-web; every file's frontmatter `url`
+# is its live page, so citations link there. videos.yaml is the BDC video sheet reduced to two fields.
 - source_type: git
   doc_type: docs
-  link: https://github.com/stagecc/bdc-gitbook   # the GitBook content repo; bdc-web's docs app syncs from it
+  link: https://github.com/stagecc/bdc-llm#docs
 - source_type: git
   doc_type: page
-  link: https://github.com/stagecc/bdc-web#apps/site/src/pages
+  link: https://github.com/stagecc/bdc-llm#site
+  exclude: [news/events/*/*, news/latest-updates/*, about/bdc/fellows.md, help/faqs.md]   # the rows below
 - source_type: git
   doc_type: update
-  link: https://github.com/stagecc/bdc-web#apps/site/src/content/news
+  link: https://github.com/stagecc/bdc-llm#site/news/latest-updates
 - source_type: git
   doc_type: event
-  link: https://github.com/stagecc/bdc-web#apps/site/src/content/events
+  link: https://github.com/stagecc/bdc-llm#site/news/events
+  exclude: archive.md   # the undated archive listing stays a page
 - source_type: git
   doc_type: fellow
-  link: https://github.com/stagecc/bdc-web#apps/site/src/content/fellows
-- source_type: freshdesk
+  link: https://github.com/stagecc/bdc-llm#site/about/bdc/fellows.md
+- source_type: git
   doc_type: faq
-  link: https://bdcatalyst.freshdesk.com/support/solutions/60000157358   # BDC FAQs (the Fellows Program FAQ category is gone)
+  link: https://github.com/stagecc/bdc-llm#site/help/faqs.md
 - source_type: transcripts
   doc_type: video
   link: videos.yaml   # video_url: YouTube URL, transcript: SRT (Drive links)

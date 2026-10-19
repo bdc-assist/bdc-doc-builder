@@ -35,15 +35,18 @@ To run the three repos together from scratch, follow "From clone to chat" in r-a
 
 ## sources.yaml
 
-A YAML list of entries with `source_type`, optional `doc_type`, and `link`. `#` comments as usual;
-relative links resolve against the file's own folder.
+A YAML list of entries with `source_type`, optional `doc_type`, `link`, and optional `exclude`. `#`
+comments as usual; relative links resolve against the file's own folder. `exclude` is a glob or a
+list of globs matched against each document's `source` (for a `path` or `git` directory, the file's
+path relative to the link; `*` also crosses `/`); matching documents are dropped, so one folder can be
+split between doc_types.
 
 | source_type | link | notes |
 | --- | --- | --- |
 | `yaml` | another list like this one | one file per category is a tidy layout; its entries inherit this entry's doc_type unless they set their own |
-| `path` | local file or directory | `.md .mdx .txt .pdf`, recursive, dot-directories skipped; markdown is chunked by header; a frontmatter-only file is indexed from its fields |
+| `path` | local file or directory | `.md .mdx .txt .pdf`, recursive, dot-directories skipped; markdown is chunked by header; a frontmatter-only file is indexed from its fields; a frontmatter `url` (http/https) becomes the `page_url` |
 | `url` | one web page | main text extracted; `.pdf`/`.md`/`.txt` URLs are read as files |
-| `git` | repo URL, optional `#subdir` | shallow-cloned into `data/repos/` (with `core.longpaths`, so deep trees work on Windows); `--pull` updates it; GitHub files get a `page_url` |
+| `git` | repo URL, optional `#subdir` or `#path/to/file` | shallow-cloned into `data/repos/` (with `core.longpaths`, so deep trees work on Windows); `--pull` updates it; GitHub files get their GitHub page as `page_url` unless their frontmatter has a `url` |
 | `youtube` | video, playlist or channel URL | captions via yt-dlp, chunked into timestamped windows |
 | `freshdesk` | help-center category or folder URL (`…/support/solutions/<id>`, `…/support/solutions/folders/<id>`) | public Freshdesk portal scrape, no API key; one document per article with `title`, `category`, `folder` metadata |
 | `transcripts` | YAML list of `{video_url, transcript}`: a local `.yaml` or a YAML URL | one document per YouTube video from its SRT transcript (a Drive link, URL or path next to the list); chunked like `youtube`, title/date from YouTube |
@@ -53,12 +56,14 @@ Omitted, blank or `none` inherits from the including `yaml` entry; entries that 
 written to `untyped.pkl` and pushed without a `doc_type`. An entry whose link doesn't fit its type
 is warned and skipped; the build only fails when nothing at all was built.
 
-`examples/bdc/sources.yaml` lists the NHLBI BioData Catalyst sources: the GitBook content repo
-(`docs`) and the website repo's pages, news, events and fellows folders (`page`, `update`, `event`,
-`fellow`), the Freshdesk FAQ category (`faq`), and the video transcripts sheet reduced to
-`examples/bdc/videos.yaml` (`video`). Every original BDC source now has a generic source type. The
-example ingests every markdown file of those folders; the original builder skipped GitBook's
-`SUMMARY.md` and a few oversized pages, which the list cannot express.
+`examples/bdc/sources.yaml` lists the NHLBI BioData Catalyst sources. Docs and website come from
+github.com/stagecc/bdc-llm, the Markdown export of the BDC GitBook and website (private: the clone
+uses your git credentials): `docs/` (`docs`); `site/` (`page`) minus what the other rows take, which
+are `site/news/latest-updates` (`update`), `site/news/events` (`event`), `site/about/bdc/fellows.md`
+(`fellow`) and `site/help/faqs.md` (`faq`). Every bdc-llm file's frontmatter `url` is its live page,
+so citations link to the website and GitBook rather than the private repo; events and updates get
+their `date` from frontmatter too. Videos come from the transcripts sheet reduced to
+`examples/bdc/videos.yaml` (`video`).
 
 `examples/fastapi/sources.yaml` builds the FastAPI docs from the English markdown in
 github.com/fastapi/fastapi: the tutorial, advanced, how-to and deployment folders (`git` with

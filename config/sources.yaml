@@ -1,11 +1,12 @@
 # r-doc-builder source list: a YAML list of entries, each with
 #   source_type: yaml (another list like this one) | path (local file/dir: .md .mdx .txt .pdf)
-#                | url (one web page) | git (repo URL, optional #subdir) | youtube (video, playlist or channel)
+#                | url (one web page) | git (repo URL, optional #subdir or #file) | youtube (video, playlist or channel)
 #                | freshdesk (help-center category or folder URL, …/support/solutions/<id>)
 #                | transcripts (YAML list of {video_url, transcript} — transcript is an SRT path, URL or Drive link)
 #   doc_type:    label pushed with every chunk (r-doc-mcp filters on it); omit or none = inherit
 #                from the yaml entry that included this file, else no doc_type at all
 #   link:        relative paths resolve against this file's folder
+#   exclude:     optional glob or list of globs; documents whose source (path relative to the link) matches are dropped
 # Uncomment and edit (an all-comment file builds nothing):
 #- source_type: path
 #  doc_type: docs
