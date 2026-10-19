@@ -1,15 +1,17 @@
 """sources.yaml -> data/<config>/<doc_type>.pkl, <config> = the CONFIG_DIR folder name. Never touches the DB;
 pushing is ingest.py's job.
 
-sources.yaml is a list of entries {source_type, doc_type, link}. source_type is one of yaml,
+sources.yaml is a list of entries {source_type, doc_type, link, exclude?}. source_type is one of yaml,
 path, url, git, youtube, transcripts, freshdesk. doc_type is free text; omitted, blank or 'none' inherits the doc_type
 of the `yaml` entry that included this file (entries that never get one land in untyped.pkl
-with no doc_type). link is relative to the file it appears in.
+with no doc_type). link is relative to the file it appears in. exclude: a glob or list of globs;
+documents whose source (a path/git directory's file path relative to the link) matches one are dropped.
 """
 import argparse
 import pickle
 import sys
 from collections import defaultdict
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 import yaml
@@ -25,7 +27,7 @@ _REMOTE = ("http://", "https://", "ssh://", "git@")
 
 
 def read_rows(path, inherited=None, _seen=None):
-    """Walk a sources yaml and the yaml files it includes -> [(source_type, doc_type|None, link, where)].
+    """Walk a sources yaml and the yaml files it includes -> [(source_type, doc_type|None, link, where, exclude)].
     Bad `yaml` entries are warned and skipped; other entries are validated later by sources.load_row."""
     path = Path(path)
     _seen = set() if _seen is None else _seen
@@ -47,6 +49,11 @@ def read_rows(path, inherited=None, _seen=None):
         if not source_type or not link:
             warn(f"{where}: source_type and link are required")
             continue
+        exclude = entry.get("exclude") or []
+        exclude = [exclude] if isinstance(exclude, str) else exclude
+        if not isinstance(exclude, list):
+            warn(f"{where}: exclude must be a glob or a list of globs")
+            continue
         if doc_type.lower() in ("", "none"):
             doc_type = inherited
         if not link.startswith(_REMOTE):
@@ -60,7 +67,7 @@ def read_rows(path, inherited=None, _seen=None):
                 continue
             rows.extend(read_rows(link, doc_type, _seen))
         else:
-            rows.append((source_type, doc_type, link, where))
+            rows.append((source_type, doc_type, link, where, tuple(str(g) for g in exclude)))
     return rows
 
 
@@ -128,7 +135,7 @@ def build(args) -> list[Path]:
     # sentences from the last build into this dir: unchanged chunks of unchanged documents keep theirs
     previous = {} if args.no_contextualize else previous_contexts(out_dir)
     groups = defaultdict(list)
-    for source_type, doc_type, link, where in tqdm(rows, desc="sources", unit="row"):
+    for source_type, doc_type, link, where, exclude in tqdm(rows, desc="sources", unit="row"):
         key = doc_type or UNTYPED
         if wanted and key not in wanted:
             continue
@@ -137,6 +144,7 @@ def build(args) -> list[Path]:
         except Exception as e:
             warn(f"{where}: {type(e).__name__}: {e}")
             continue
+        docs = [d for d in docs if not any(fnmatchcase(d["metadata"]["source"], g) for g in exclude)]
         if not docs:  # wrong git subdir, JS-only page, scanned PDF: as lost as a row that fails
             warn(f"{where}: {source_type} {link} -> 0 documents")
             continue

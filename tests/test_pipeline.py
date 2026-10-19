@@ -137,9 +137,13 @@ def test_invoke_llm_retries_then_gives_up_and_summary_passthrough():
 def test_chunk_markdown_by_headers_keeps_hierarchy():
     md = "intro line\n# Title\ntext a\n## Sub\ntext b\n![img](x.png)\n### Deep\ntext c\n## Sub2\ntext d\n"
     text, chunks = sources.chunk_markdown(md)
-    assert [c["content"] for c in chunks] == ["intro line", "text a", "text b", "text c", "text d"]
-    assert [c["hierarchy"] for c in chunks] == ["", "Title", "Title, Sub", "Title, Sub, Deep", "Title, Sub2"]
+    assert [c["content"] for c in chunks] == ["intro line\ntext a", "text b", "text c", "text d"], \
+        "a label above the # title belongs to the title's section, not a chunk of its own"
+    assert [c["hierarchy"] for c in chunks] == ["Title", "Title, Sub", "Title, Sub, Deep", "Title, Sub2"]
     assert "![img]" not in text, "images stripped from the document text too"
+    _, chunks = sources.chunk_markdown("intro paragraph\n## First\ntext\n")
+    assert chunks == [{"content": "intro paragraph", "hierarchy": ""}, {"content": "text", "hierarchy": "First"}], \
+        "with no # title (a page whose title is in frontmatter) the intro stays its own chunk"
 
 
 def test_chunk_markdown_splits_long_sections():
@@ -166,6 +170,12 @@ def test_load_file_markdown_frontmatter_title_and_date():
     assert doc["metadata"] == {"source": "post.md", "page_url": "post.md", "title": "Hello", "date": "2025-01-15"}
     assert doc["chunks"] == [{"content": "body", "hierarchy": "H"}]
     assert doc["text"].startswith("# H"), "frontmatter is not part of the document text"
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "a.md").write_text("---\nurl: https://site.org/a/\n---\nbody\n", encoding="utf-8")
+        (Path(d) / "b.md").write_text("---\nurl: /b/\n---\nbody\n", encoding="utf-8")
+        assert sources.load_file(Path(d) / "a.md", Path(d), "https://github.com/o/r/blob/HEAD/a.md")["metadata"]["page_url"] \
+            == "https://site.org/a/", "a frontmatter url is the published page"
+        assert sources.load_file(Path(d) / "b.md", Path(d))["metadata"]["page_url"] == "b.md", "only http(s) urls"
 
 
 def test_load_file_txt_and_empty():
@@ -258,6 +268,9 @@ def test_load_git_clones_once_pulls_on_request_and_links_to_github():
             assert docs[0]["metadata"] == {"source": "g.md", "page_url": "https://github.com/org/repo/blob/HEAD/docs/g.md"}
             sources.load_git("https://github.com/org/repo#docs")
             assert len(calls) == 1, "existing clone reused without --pull"
+            (doc,) = sources.load_git("https://github.com/org/repo#docs/g.md")
+            assert doc["metadata"] == {"source": "g.md", "page_url": "https://github.com/org/repo/blob/HEAD/docs/g.md"}, \
+                "#path/to/file loads that one file"
             sources.load_git("https://github.com/org/repo#docs", pull=True)
             assert calls[-1][:3] == ["git", "-C", str(Path(d) / "github.com_org_repo")] and "pull" in calls[-1]
             try:
@@ -412,8 +425,8 @@ def test_read_rows_comments_relative_paths_and_inheritance():
                "- {source_type: yaml, doc_type: faq, link: sub/faq.yaml}\n"
                "- {source_type: url, doc_type: ' ', link: https://x/a}\n"
                "- {source_type: URL, doc_type: none, link: https://x/b}\n"
-               "- {source_type: path, doc_type: docs, link: local}\n"
-               "- {source_type: url, link: https://x/c}\n")
+               "- {source_type: path, doc_type: docs, link: local, exclude: [a/*, b.md]}\n"
+               "- {source_type: url, link: https://x/c, exclude: c*}\n")
         _write(d / "sub" / "faq.yaml",
                "- {source_type: url, link: https://x/f1}\n"
                "- {source_type: url, doc_type: other, link: https://x/f2}\n"
@@ -421,7 +434,7 @@ def test_read_rows_comments_relative_paths_and_inheritance():
         err = io.StringIO()
         with redirect_stderr(err):
             rows = pipeline.read_rows(d / "sources.yaml")
-    assert [(t, dt, link) for t, dt, link, _ in rows] == [
+    assert [(t, dt, link) for t, dt, link, _, _ in rows] == [
         ("url", "faq", "https://x/f1"),          # inherited from the yaml entry
         ("url", "other", "https://x/f2"),        # included file's own doc_type wins
         ("url", None, "https://x/a"),            # blank -> none
@@ -430,6 +443,7 @@ def test_read_rows_comments_relative_paths_and_inheritance():
         ("url", None, "https://x/c"),            # doc_type omitted -> none
     ]
     assert rows[0][3].endswith("faq.yaml[1]"), "where = file[entry] for warnings"
+    assert [r[4] for r in rows] == [(), (), (), (), ("a/*", "b.md"), ("c*",)], "exclude: a list, a lone glob, or none"
     assert re.search(r"faq\.yaml\[3\]: .*already included", err.getvalue()), err.getvalue()
 
 
@@ -439,6 +453,7 @@ def test_read_rows_warns_and_skips_bad_entries():
                "- {source_type: yaml, doc_type: x, link: missing.yaml}\n"
                "- {source_type: yaml, doc_type: x, link: notyaml.txt}\n"
                "- {source_type: url, doc_type: x}\n"
+               "- {source_type: url, doc_type: x, link: https://x, exclude: {a: 1}}\n"
                "- just a string\n")
         _write(Path(d) / "notyaml.txt", "")
         _write(Path(d) / "map.yaml", "source_type: url\nlink: https://x\n")
@@ -446,7 +461,7 @@ def test_read_rows_warns_and_skips_bad_entries():
         with redirect_stderr(err):
             assert pipeline.read_rows(Path(d) / "s.yaml") == []
             assert pipeline.read_rows(Path(d) / "map.yaml") == []
-    assert err.getvalue().count("warning:") == 5
+    assert err.getvalue().count("warning:") == 6
 
 
 def test_to_records_merges_metadata_and_contextualizes():
@@ -641,6 +656,26 @@ def test_build_warns_on_a_source_with_no_documents():
         assert len(warnings) == 1 and "empty" in warnings[0] and "0 documents" in warnings[0], warnings
 
 
+def test_build_exclude_splits_a_folder_between_doc_types():
+    """bdc-llm's site/ holds pages, dated news and a FAQ page in one tree: exclude carves the
+    page row so no document lands in two doc_types (ingest refuses that)."""
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        for rel in ("site/index.md", "site/news/archive.md", "site/news/2025/05/a.md", "site/help/faqs.md"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            _write(d / rel, f"# {rel}\ntext")
+        _write(d / "sources.yaml", "- {source_type: path, doc_type: page, link: site, exclude: [news/*/*, help/faqs.md]}\n"
+                                   "- {source_type: path, doc_type: update, link: site/news, exclude: archive.md}\n"
+                                   "- {source_type: path, doc_type: faq, link: site/help, exclude: nothing*}\n")
+        with redirect_stderr(io.StringIO()):
+            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
+        sources_of = {}
+        for p in paths:
+            with open(p, "rb") as f:
+                sources_of[p.stem] = sorted({r["metadata"]["source"] for r in pickle.load(f)})
+    assert sources_of == {"page": ["index.md", "news/archive.md"], "update": ["2025/05/a.md"], "faq": ["faqs.md"]}, sources_of
+
+
 def _contexts(*paths):
     found = {}
     for path in paths:
@@ -765,6 +800,7 @@ if __name__ == "__main__":
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
     test_build_warns_on_a_source_with_no_documents()
+    test_build_exclude_splits_a_folder_between_doc_types()
     test_fixture_corpus_builds_every_doc_type_offline()
     test_build_reuses_context_of_unchanged_documents()
     test_context_reuse_misses_when_prompt_or_model_changes()

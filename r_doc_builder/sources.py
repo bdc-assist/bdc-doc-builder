@@ -66,7 +66,9 @@ def chunk_markdown(text):
     """One chunk per header section, 'hierarchy' = the header path; a section longer than
     CHUNK_SIZE is split further, every piece keeping its hierarchy.
     Returns (cleaned text, chunks); MDX imports/JSX, images and reference links are stripped
-    outside fenced code, and a "# comment" inside a fence is not a header."""
+    outside fenced code, and a "# comment" inside a fence is not a header. Text above the first
+    header, when that header is a "# title", is part of the title's section: a label over the title
+    ("News", "BDC-Hosted Data") is not a chunk of its own."""
     text = _strip_mdx(text)
     chunks, current, headers, in_fence = [], [], [], False
 
@@ -80,8 +82,9 @@ def chunk_markdown(text):
         in_fence ^= bool(_FENCE.match(line))
         m = not in_fence and _HEADER.match(line)
         if m:
-            flush()
-            current = []
+            if headers or len(m.group(1)) > 1:  # else: the first header is the "# title", keep what's above it
+                flush()
+                current = []
             headers = headers[: len(m.group(1)) - 1] + [m.group(2).strip()]
         else:
             current.append(line)
@@ -122,9 +125,12 @@ def _split_frontmatter(text):
     return (meta if isinstance(meta, dict) else {}), text[m.end():]
 
 
-def _set_title_date(meta, title, date):
+def _set_title_date(meta, title, date, url=None):
+    """url: a frontmatter `url` naming the page's published location replaces page_url."""
     if title:
         meta["title"] = str(title)
+    if isinstance(url, str) and url.startswith(("http://", "https://")):
+        meta["page_url"] = url
     if hasattr(date, "strftime"):  # yaml parses bare dates
         date = date.strftime("%Y-%m-%d")
     if date and re.match(r"\d{4}-\d{2}-\d{2}", str(date)):
@@ -158,7 +164,7 @@ def load_file(path, root=None, page_url=None):
         raw = path.read_text(encoding="utf-8", errors="replace")
         if suffix in (".md", ".mdx"):
             fm, body = _split_frontmatter(raw)
-            _set_title_date(meta, fm.get("title") or fm.get("name"), fm.get("date"))
+            _set_title_date(meta, fm.get("title") or fm.get("name"), fm.get("date"), fm.get("url"))
             if fm and not body.strip():
                 body = _frontmatter_text(fm)  # frontmatter-only files (people, projects): the fields are the document
             text, chunks = chunk_markdown(body)
@@ -203,7 +209,7 @@ def load_url(link):
         text, chunks = read_pdf(BytesIO(resp.content))
     elif ext in (".md", ".mdx"):
         fm, body = _split_frontmatter(resp.text)
-        _set_title_date(meta, fm.get("title"), fm.get("date"))
+        _set_title_date(meta, fm.get("title"), fm.get("date"), fm.get("url"))
         text, chunks = chunk_markdown(body)
     elif ext == ".txt":
         text, chunks = resp.text, chunk_text(resp.text)
@@ -224,7 +230,8 @@ def _repo_slug(url):
 
 def load_git(link, pull=False):
     """Clone (depth 1) into REPOS_DIR/<slug>, or reuse the clone (pull only with --pull), then
-    load it like a path. link may end in #subdir. A local directory as link is used as the clone."""
+    load it like a path. link may end in #subdir, or #path/to/file for one file. A local directory
+    as link is used as the clone."""
     url, _, subdir = link.partition("#")
     if Path(url).is_dir():
         clone = Path(url)
@@ -240,13 +247,16 @@ def load_git(link, pull=False):
         elif pull:
             subprocess.run(["git", "-C", str(clone), "-c", "core.longpaths=true", "pull", "--ff-only"], check=True)
     root = clone / subdir if subdir else clone
-    if not root.is_dir():
+    if not root.exists():
         raise ValueError(f"subdir not found in repo: {subdir or clone}")
     m = re.match(r"https?://github\.com/([^/]+/[^/#]+?)(?:\.git)?/?$", url)
     page_url_for = None
     if m:
         def page_url_for(rel):
             return f"https://github.com/{m.group(1)}/blob/HEAD/{(Path(subdir) / rel).as_posix() if subdir else rel.as_posix()}"
+    if root.is_file():  # source = the file name, like a file of a subdir row; page_url = its GitHub page
+        doc = load_file(root, root.parent, page_url_for and page_url_for(Path()))
+        return [doc] if doc else []
     return load_path(str(root), page_url_for)
 
 
