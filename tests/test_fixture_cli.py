@@ -84,7 +84,9 @@ def test_fixture_rehearsal():
         assert all(embed > 0 and (update, same, delete) == (0, 0, 0)
                    for embed, update, same, delete in first.values()), first
         total = sum(embed for embed, *_ in first.values())
-        assert requests.get(url + "/health").json()["documents"] == total
+        health = requests.get(url + "/health").json()
+        assert health["documents"] == total
+        assert set(DOC_TYPES) <= set(health["last_ingest"]), health  # each pushed doc_type's ingest time
 
         # 2. rebuilding unchanged sources and pushing again costs nothing
         again = _ingest(url, cfg, *build, data)

@@ -298,9 +298,12 @@ Then production:
 - **Dimension errors or nonsense results after switching embedding models**: vectors from
   different models don't mix. `--reset` and re-push with the new model, and change
   `EMBEDDING_*` on the server side too.
-- **`--build` prints `warning: ...` lines**: those rows were skipped (bad link for the type,
-  missing path, no captions). Fix the row or ignore; the build only aborts when nothing was
-  built.
+- **`warning: skipped <doc_type>: a source above failed`**: the rows warned just before it didn't
+  load (bad link for the type, missing path, no captions, 0 documents), so that whole doc_type was
+  left out of this build and push; the DB keeps its previous version. The other doc_types went
+  through. Fix the rows, then rebuild only those: `--build --sources <doc_type> ...` (no `--reset`,
+  which drops every doc_type). Other `warning: ...` lines (one video without a transcript, one
+  unreadable file in a folder) only drop that document.
 - **A push died part-way** (Ctrl-C, dropped tunnel, crash): rerun the same command without
   `--reset`. Chunks already stored are skipped; only the rest is embedded.
 - **`ingest API call failed (ConnectionError); retrying`**: the connection to r-doc-mcp dropped
