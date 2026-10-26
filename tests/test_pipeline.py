@@ -447,21 +447,23 @@ def test_read_rows_comments_relative_paths_and_inheritance():
     assert re.search(r"faq\.yaml\[3\]: .*already included", err.getvalue()), err.getvalue()
 
 
-def test_read_rows_warns_and_skips_bad_entries():
+def test_read_rows_refuses_bad_entries():
+    """Every source listed must build: a malformed entry stops the build instead of being skipped."""
+    bad = ["- {source_type: yaml, doc_type: x, link: missing.yaml}\n",
+           "- {source_type: yaml, doc_type: x, link: notyaml.txt}\n",
+           "- {source_type: url, doc_type: x}\n",
+           "- {source_type: url, doc_type: x, link: https://x, exclude: {a: 1}}\n",
+           "- just a string\n",
+           "source_type: url\nlink: https://x\n"]  # a mapping, not a list
     with tempfile.TemporaryDirectory() as d:
-        _write(Path(d) / "s.yaml",
-               "- {source_type: yaml, doc_type: x, link: missing.yaml}\n"
-               "- {source_type: yaml, doc_type: x, link: notyaml.txt}\n"
-               "- {source_type: url, doc_type: x}\n"
-               "- {source_type: url, doc_type: x, link: https://x, exclude: {a: 1}}\n"
-               "- just a string\n")
         _write(Path(d) / "notyaml.txt", "")
-        _write(Path(d) / "map.yaml", "source_type: url\nlink: https://x\n")
-        err = io.StringIO()
-        with redirect_stderr(err):
-            assert pipeline.read_rows(Path(d) / "s.yaml") == []
-            assert pipeline.read_rows(Path(d) / "map.yaml") == []
-    assert err.getvalue().count("warning:") == 6
+        for text in bad:
+            _write(Path(d) / "s.yaml", text)
+            try:
+                pipeline.read_rows(Path(d) / "s.yaml")
+                raise AssertionError(f"must be refused: {text!r}")
+            except ValueError as e:
+                assert "s.yaml" in str(e), e
 
 
 def test_to_records_merges_metadata_and_contextualizes():
@@ -490,29 +492,42 @@ def _args(**kw):
     return args
 
 
-def test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows():
+def test_build_groups_by_doc_type_and_filters_sources():
     with tempfile.TemporaryDirectory() as d:
         d = Path(d); (d / "docs").mkdir()
         _write(d / "docs" / "a.md", "# A\nay")
-        _write(d / "sources.yaml",
-               "- {source_type: path, doc_type: docs, link: docs}\n"
-               "- {source_type: path, link: docs/a.md}\n"
-               "- {source_type: path, doc_type: docs, link: missing}\n"
-               "- {source_type: youtube, doc_type: video, link: https://vimeo.com/1}\n")
-        err = io.StringIO()
-        with redirect_stderr(err):
-            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
-        assert sorted(p.name for p in paths) == ["docs.pkl", "untyped.pkl"]
+        good = ("- {source_type: path, doc_type: docs, link: docs}\n"
+                "- {source_type: path, link: docs/a.md}\n")
+        _write(d / "sources.yaml", good)
+        with redirect_stderr(io.StringIO()):
+            paths, skipped = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
+        assert sorted(p.name for p in paths) == ["docs.pkl", "untyped.pkl"] and skipped == []
         with open(d / "out" / "docs.pkl", "rb") as f:
             docs_recs = pickle.load(f)
         with open(d / "out" / "untyped.pkl", "rb") as f:
             untyped_recs = pickle.load(f)
         assert docs_recs[0]["metadata"]["doc_type"] == "docs" and "doc_type" not in untyped_recs[0]["metadata"]
-        assert err.getvalue().count("warning:") == 2, "missing path and non-YouTube link are warned, build continues"
 
+        # a failing row skips its whole doc_type, before any LLM call, while the others build
+        _write(d / "sources.yaml", good + "- {source_type: path, doc_type: docs, link: missing}\n"
+                                          "- {source_type: youtube, doc_type: video, link: https://vimeo.com/1}\n")
+        llm, original, err = [], pipeline.contextualize_chunk, io.StringIO()
+        pipeline.contextualize_chunk = lambda chunk, whole: llm.append(chunk) or chunk
+        try:
+            with redirect_stderr(err):
+                paths, skipped = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out2")))
+        finally:
+            pipeline.contextualize_chunk = original
+        assert [p.name for p in paths] == ["untyped.pkl"] and skipped == ["docs", "video"], (paths, skipped)
+        assert len(llm) == len(untyped_recs), "only the doc_type that built was contextualized"
+        warnings = err.getvalue()
+        assert "sources.yaml[3]" in warnings and "sources.yaml[4]" in warnings, warnings
+        assert "rebuild with --sources docs video" in warnings, warnings
+
+        # rows of doc_types not selected are never loaded, so they can't skip anything
         with redirect_stderr(io.StringIO()):
-            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out2"), no_contextualize=True, sources=["untyped"]))
-        assert [p.name for p in paths] == ["untyped.pkl"]
+            paths, skipped = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out3"), no_contextualize=True, sources=["untyped"]))
+        assert [p.name for p in paths] == ["untyped.pkl"] and skipped == []
 
         _write(d / "empty.yaml", "- {source_type: path, doc_type: docs, link: missing}\n")
         try:
@@ -596,7 +611,8 @@ def test_fixture_corpus_builds_every_doc_type_offline():
     try:
         with tempfile.TemporaryDirectory() as d:
             with redirect_stderr(io.StringIO()):
-                paths = pipeline.build(_args(yaml=str(FIXTURE / "sources.yaml"), data_dir=d, no_contextualize=True))
+                paths, skipped = pipeline.build(_args(yaml=str(FIXTURE / "sources.yaml"), data_dir=d, no_contextualize=True))
+            assert skipped == [], skipped
             recs = {}
             for path in paths:
                 with open(path, "rb") as f:
@@ -639,21 +655,20 @@ def test_fixture_corpus_builds_every_doc_type_offline():
             assert "quote dates" in str(e), e
 
 
-def test_build_warns_on_a_source_with_no_documents():
-    """A row that loads nothing (wrong git subdir, JS-only page, scanned PDF) is warned like a row
-    that fails; it used to pass with only a progress line while the build carried on without it."""
+def test_build_skips_the_doc_type_of_a_source_with_no_documents():
+    """A row that loads nothing (wrong git subdir, JS-only page, scanned PDF) fails like a row that
+    raises; it used to pass with only a progress line while the build carried on without it."""
     with tempfile.TemporaryDirectory() as d:
         d = Path(d); (d / "docs").mkdir(); (d / "empty").mkdir()
         _write(d / "docs" / "a.md", "# A\nay")
         _write(d / "sources.yaml", "- {source_type: path, doc_type: docs, link: docs}\n"
-                                   "- {source_type: path, doc_type: docs, link: empty}\n")
+                                   "- {source_type: path, doc_type: docs, link: empty}\n"
+                                   "- {source_type: path, doc_type: faq, link: docs}\n")
         err = io.StringIO()
         with redirect_stderr(err):
-            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
-        assert [p.name for p in paths] == ["docs.pkl"], "the other rows still build"
-        # tqdm's bar control codes can precede it on the line
-        warnings = [line.split("warning:", 1)[1] for line in err.getvalue().splitlines() if "warning:" in line]
-        assert len(warnings) == 1 and "empty" in warnings[0] and "0 documents" in warnings[0], warnings
+            paths, skipped = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
+        assert [p.name for p in paths] == ["faq.pkl"] and skipped == ["docs"], "docs' good row is not built alone"
+        assert "empty -> 0 documents" in err.getvalue(), err.getvalue()
 
 
 def test_build_exclude_splits_a_folder_between_doc_types():
@@ -668,7 +683,7 @@ def test_build_exclude_splits_a_folder_between_doc_types():
                                    "- {source_type: path, doc_type: update, link: site/news, exclude: archive.md}\n"
                                    "- {source_type: path, doc_type: faq, link: site/help, exclude: nothing*}\n")
         with redirect_stderr(io.StringIO()):
-            paths = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
+            paths, _ = pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True))
         sources_of = {}
         for p in paths:
             with open(p, "rb") as f:
@@ -796,10 +811,10 @@ if __name__ == "__main__":
     test_load_freshdesk_walks_category_folders_and_articles()
     test_load_row_rejects_mismatched_links()
     test_read_rows_comments_relative_paths_and_inheritance()
-    test_read_rows_warns_and_skips_bad_entries()
+    test_read_rows_refuses_bad_entries()
     test_to_records_merges_metadata_and_contextualizes()
-    test_build_groups_by_doc_type_filters_sources_and_skips_bad_rows()
-    test_build_warns_on_a_source_with_no_documents()
+    test_build_groups_by_doc_type_and_filters_sources()
+    test_build_skips_the_doc_type_of_a_source_with_no_documents()
     test_build_exclude_splits_a_folder_between_doc_types()
     test_fixture_corpus_builds_every_doc_type_offline()
     test_build_reuses_context_of_unchanged_documents()

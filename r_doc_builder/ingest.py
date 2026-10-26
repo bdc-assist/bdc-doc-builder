@@ -146,9 +146,9 @@ def _api_post(path, payload):
 
 def reset_remote():
     """Drop the server-side collection so the next push starts empty. An r-doc-mcp older than this
-    push client 404s on /ingest/lookup: ask it first, so a mismatch stops the run before the DB is
+    push client 404s on /ingest/done: ask it first, so a mismatch stops the run before the DB is
     dropped and a push that cannot work follows."""
-    _api_post("/ingest/lookup", {"sources": []})
+    _api_post("/ingest/done", {"doc_types": []})
     print("resetting remote collection")
     _api_post("/ingest/reset", None)
 
@@ -245,6 +245,8 @@ def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, 
                             [_with_removals(metas[i], stored.get(ids[i], {})) for i in part])
                 bar.update(len(part))
         _post_batches("/ingest/delete", stale)  # last: a document never loses chunks before their replacements are in
+        # the file is fully stored, changed or not: its doc_types' last successful ingest, for r-doc-mcp's /health
+        _api_post("/ingest/done", {"doc_types": sorted({m.get("doc_type") or pipeline.UNTYPED for m in metas})})
         total += len(embed)
     return total
 
@@ -272,12 +274,18 @@ def main(argv=None):
     if args.dry_run and args.reset:
         parser.error("--dry-run can't be combined with --reset")
 
-    built = pipeline.build(args) if args.build else []  # before --reset: a failed build must not empty the DB
+    built, skipped = pipeline.build(args) if args.build else ([], [])  # before --reset: a failed build must not empty the DB
+    if args.reset and skipped:
+        sys.exit(f"not resetting: {', '.join(skipped)} failed to build and would be left empty (see the warnings "
+                 f"above); fix the sources, or push without --reset")
     if args.reset:
         reset_remote()
     total = ingest_paths(built + args.paths, args.doc_type, args.summarize, args.dry_run)
     print("dry run: nothing embedded or written" if args.dry_run
           else f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
+    if skipped:
+        sources.warn(f"not built, so not pushed: {', '.join(skipped)} (a source failed, see above); "
+                     f"once fixed, rerun with --build --sources {' '.join(skipped)}")
 
 
 if __name__ == "__main__":

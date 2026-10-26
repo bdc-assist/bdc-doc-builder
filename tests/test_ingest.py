@@ -150,7 +150,7 @@ def test_reset_remote_checks_the_server_before_dropping_anything():
 
     def old_server(path, payload):
         calls.append(path)
-        raise RuntimeError("POST /ingest/lookup -> 404: Not Found")
+        raise RuntimeError("POST /ingest/done -> 404: Not Found")
 
     ingest._api_post = old_server
     try:
@@ -161,7 +161,7 @@ def test_reset_remote_checks_the_server_before_dropping_anything():
             assert "404" in str(e)
     finally:
         ingest._api_post = original
-    assert calls == ["/ingest/lookup"], calls
+    assert calls == ["/ingest/done"], calls
 
 
 def test_fake_embedding_provider_is_offline_deterministic_and_named():
@@ -196,7 +196,7 @@ def test_reset_remote_drops_the_collection_on_a_current_server():
             ingest.reset_remote()
     finally:
         ingest._api_post = original
-    assert calls == [("/ingest/lookup", {"sources": []}), ("/ingest/reset", None)], calls
+    assert calls == [("/ingest/done", {"doc_types": []}), ("/ingest/reset", None)], calls
 
 
 def test_files_without_chunks_are_skipped():
@@ -211,7 +211,7 @@ def test_files_without_chunks_are_skipped():
             pickle.dump([_row("one")], f)
         with redirect_stdout(out):
             assert _run_paths(server, emb, [Path(d)]) == 1
-    assert [path for path, _ in server.calls] == ["/ingest/lookup", "/ingest/upsert"], server.calls
+    assert [path for path, _ in server.calls] == ["/ingest/lookup", "/ingest/upsert", "/ingest/done"], server.calls
     assert "empty.pkl" not in out.getvalue() and "blank.md" not in out.getvalue(), out.getvalue()
 
 
@@ -432,7 +432,8 @@ def test_ingest_paths_keeps_record_doc_type_unless_overridden():
     ingest.get_emb = lambda: FakeEmb()
     ingest._embed_batched = lambda emb, texts, desc="": [[0.0] for _ in texts]
     ingest.push_chunks = lambda ids, contents, embeddings, metas, desc="": pushed.extend(metas)
-    ingest._api_post = lambda path, payload: {}  # an empty DB: every chunk is new
+    done = []  # an empty DB: every chunk is new
+    ingest._api_post = lambda path, payload: done.append(payload["doc_types"]) if path == "/ingest/done" else {}
     try:
         with tempfile.TemporaryDirectory() as d:
             with open(Path(d) / "faq.pkl", "wb") as f:
@@ -449,11 +450,14 @@ def test_ingest_paths_keeps_record_doc_type_unless_overridden():
             adhoc = next(m for m in pushed if m["source"].endswith("adhoc.md"))
             assert adhoc["hierarchy"] == "T", "ad-hoc files go through sources.load_file"
             assert adhoc["date_num"] == 20250115, "ad-hoc files get date_num like pipeline records"
+            assert done == [["untyped"], ["faq"], ["untyped"]], "each file stamps its doc_types, untyped as such"
 
             pushed.clear()
+            done.clear()
             with redirect_stderr(io.StringIO()):
                 ingest.ingest_paths([d], doc_type="docs")
             assert {m["doc_type"] for m in pushed} == {"docs"}, "--doc-type overrides everything"
+            assert done == [["docs"]] * 3
     finally:
         ingest.get_emb, ingest._embed_batched, ingest.push_chunks, ingest._api_post = originals
 
@@ -464,7 +468,7 @@ def test_push_skips_what_is_already_stored():
     assert _push(server, emb, rows) == 3 and emb.texts == 3
     server.calls.clear()
     assert _push(server, emb, rows) == 0, "nothing changed: nothing embedded"
-    assert emb.texts == 3 and server.writes() == [], "and nothing written"
+    assert emb.texts == 3 and server.writes() == ["/ingest/done"], "and nothing written but the ingest time"
 
 
 def test_metadata_only_change_updates_in_place():
@@ -473,7 +477,7 @@ def test_metadata_only_change_updates_in_place():
     vector = next(iter(server.rows.values()))["embedding"]
     server.calls.clear()
     assert _push(server, emb, [_row("one", title="New")]) == 0, "metadata alone never re-embeds"
-    assert server.writes() == ["/ingest/update"]
+    assert server.writes() == ["/ingest/update", "/ingest/done"]
     (row,) = server.rows.values()
     assert row["metadata"]["title"] == "New" and "date" not in row["metadata"], "a dropped key is deleted, not kept"
     assert row["embedding"] == vector
@@ -496,7 +500,8 @@ def test_chunks_a_document_dropped_are_deleted_and_nothing_else():
           name="other.pkl")
     _push(server, emb, [_row("one"), _row("three 3")])
     assert sorted(r["content"] for r in server.rows.values()) == ["one", "other", "three 3"]
-    assert server.writes()[-1] == "/ingest/delete", "deletes go last, after the replacements are stored"
+    assert server.writes()[-2:] == ["/ingest/delete", "/ingest/done"], \
+        "deletes go last, after the replacements are stored; the ingest time once all is stored"
 
 
 def test_killed_push_resumes_without_reembedding_what_was_stored():
@@ -508,6 +513,7 @@ def test_killed_push_resumes_without_reembedding_what_was_stored():
             raise AssertionError("the dead embedding endpoint must stop the run")
         except ConnectionError:
             pass
+        assert "/ingest/done" not in server.writes(), "a failed push is no successful ingest"
         assert len(server.rows) == 2, "the first slice was stored before the second was embedded"
         healthy = CountingEmb()
         assert _push(server, healthy, rows) == 3 and healthy.texts == 3, "the rerun embeds only the rest"
@@ -520,7 +526,7 @@ def test_main_build_runs_pipeline_then_reset_then_push():
     from r_doc_builder import pipeline
     calls = []
     originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
-    pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or [Path("data/docs.pkl")]
+    pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or ([Path("data/docs.pkl")], [])
     ingest.reset_remote = lambda: calls.append(("reset",))
     ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False: calls.append(("push", [str(p) for p in paths])) or 0
     try:
@@ -530,6 +536,30 @@ def test_main_build_runs_pipeline_then_reset_then_push():
 
     assert calls == [("build", ["docs"], True), ("reset",), ("push", [str(Path("data/docs.pkl")), "extra.md"])], \
         "pipeline args pass through; build before reset (a failed build must not empty the DB); push built + given"
+
+
+def test_main_pushes_what_built_and_names_what_to_rebuild():
+    """A doc_type skipped by the build (a source failed) is left as it is in the DB: the rest is pushed
+    and the run ends saying what to rebuild, but --reset is refused, as it would leave it empty."""
+    from r_doc_builder import pipeline
+    calls, err = [], io.StringIO()
+    originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
+    pipeline.build = lambda args: ([Path("data/docs.pkl")], ["faq", "video"])
+    ingest.reset_remote = lambda: calls.append("reset")
+    ingest.ingest_paths = lambda paths, *a: calls.append("push") or 0
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            ingest.main(["--build"])
+            assert calls == ["push"], calls
+            assert "rerun with --build --sources faq video" in err.getvalue(), err.getvalue()
+            try:
+                ingest.main(["--build", "--reset"])
+                raise AssertionError("--reset must be refused when a doc_type was skipped")
+            except SystemExit as e:
+                assert "faq, video" in str(e.code), e.code
+    finally:
+        pipeline.build, ingest.reset_remote, ingest.ingest_paths = originals
+    assert calls == ["push"], "nothing reset, nothing pushed"
 
 
 def test_dry_run_reports_and_writes_nothing():
@@ -629,5 +659,6 @@ if __name__ == "__main__":
     test_dry_run_reports_and_writes_nothing()
     test_main_dry_run_passes_through_and_refuses_reset()
     test_main_build_runs_pipeline_then_reset_then_push()
+    test_main_pushes_what_built_and_names_what_to_rebuild()
     test_main_requires_paths_or_build()
     print("ingest self-check passed")

@@ -28,40 +28,36 @@ _REMOTE = ("http://", "https://", "ssh://", "git@")
 
 def read_rows(path, inherited=None, _seen=None):
     """Walk a sources yaml and the yaml files it includes -> [(source_type, doc_type|None, link, where, exclude)].
-    Bad `yaml` entries are warned and skipped; other entries are validated later by sources.load_row."""
+    A malformed entry raises ValueError: every source listed must build; other entries are validated
+    later by sources.load_row."""
     path = Path(path)
     _seen = set() if _seen is None else _seen
     _seen.add(path.resolve())
     with open(path, encoding="utf-8") as f:
         entries = yaml.safe_load(f) or []
     if not isinstance(entries, list):
-        warn(f"{path}: expected a list of entries, got {type(entries).__name__}")
-        return []
+        raise ValueError(f"{path}: expected a list of entries, got {type(entries).__name__}")
     rows = []
     for n, entry in enumerate(entries, start=1):
         where = f"{path}[{n}]"
         if not isinstance(entry, dict):
-            warn(f"{where}: expected a mapping with source_type, doc_type, link")
-            continue
+            raise ValueError(f"{where}: expected a mapping with source_type, doc_type, link")
         source_type = str(entry.get("source_type") or "").strip().lower()
         doc_type = str(entry.get("doc_type") or "").strip()
         link = str(entry.get("link") or "").strip()
         if not source_type or not link:
-            warn(f"{where}: source_type and link are required")
-            continue
+            raise ValueError(f"{where}: source_type and link are required")
         exclude = entry.get("exclude") or []
         exclude = [exclude] if isinstance(exclude, str) else exclude
         if not isinstance(exclude, list):
-            warn(f"{where}: exclude must be a glob or a list of globs")
-            continue
+            raise ValueError(f"{where}: exclude must be a glob or a list of globs")
         if doc_type.lower() in ("", "none"):
             doc_type = inherited
         if not link.startswith(_REMOTE):
             link = str(path.parent / link)  # relative to this file's folder
         if source_type == "yaml":
             if not link.lower().endswith((".yaml", ".yml")) or not Path(link).is_file():
-                warn(f"{where}: yaml link must be an existing .yaml file: {link}")
-                continue
+                raise ValueError(f"{where}: yaml link must be an existing .yaml file: {link}")
             if Path(link).resolve() in _seen:
                 warn(f"{where}: {link} already included, skipping")
                 continue
@@ -126,15 +122,20 @@ def add_args(parser):
     parser.add_argument("--data-dir", default=PREPROC_DATA_DIR, help="where the .pkl files go (default: %(default)s)")
 
 
-def build(args) -> list[Path]:
-    """Build the selected doc_types into <data-dir>/<doc_type>.pkl; returns the paths written.
-    Rows that fail are warned and skipped; exits non-zero only when nothing was built."""
-    rows = read_rows(args.yaml)
+def build(args) -> tuple[list[Path], list[str]]:
+    """Build the selected doc_types into <data-dir>/<doc_type>.pkl -> (paths written, doc_types skipped).
+    A doc_type is all or nothing: a row that fails or loads no documents is warned and its whole
+    doc_type skipped (the previous .pkl and the DB keep its last good build, so it is never pushed
+    half-loaded or stamped as freshly ingested) while the other doc_types build; rebuild it with
+    --sources once fixed. Every row loads before any contextualizing, so a skipped doc_type costs no
+    LLM calls. Exits non-zero when nothing was built."""
+    try:
+        rows = read_rows(args.yaml)
+    except ValueError as e:
+        sys.exit(f"build stopped, nothing written: {e}")
     wanted = None if "all" in args.sources else set(args.sources)
     out_dir = Path(args.data_dir)
-    # sentences from the last build into this dir: unchanged chunks of unchanged documents keep theirs
-    previous = {} if args.no_contextualize else previous_contexts(out_dir)
-    groups = defaultdict(list)
+    loaded, failed = [], set()
     for source_type, doc_type, link, where, exclude in tqdm(rows, desc="sources", unit="row"):
         key = doc_type or UNTYPED
         if wanted and key not in wanted:
@@ -143,12 +144,25 @@ def build(args) -> list[Path]:
             docs = sources.load_row(source_type, link, pull=args.pull)
         except Exception as e:
             warn(f"{where}: {type(e).__name__}: {e}")
+            failed.add(key)
             continue
         docs = [d for d in docs if not any(fnmatchcase(d["metadata"]["source"], g) for g in exclude)]
         if not docs:  # wrong git subdir, JS-only page, scanned PDF: as lost as a row that fails
             warn(f"{where}: {source_type} {link} -> 0 documents")
+            failed.add(key)
             continue
         tqdm.write(f"{where}: {source_type} {link} -> {len(docs)} documents", file=sys.stderr)
+        loaded.append((key, doc_type, link, docs))
+    skipped = sorted(failed)
+    if skipped:
+        warn(f"skipped {', '.join(skipped)}: a source above failed, so nothing of it is built; "
+             f"once fixed, rebuild with --sources {' '.join(skipped)}")
+    # sentences from the last build into this dir: unchanged chunks of unchanged documents keep theirs
+    previous = {} if args.no_contextualize else previous_contexts(out_dir)
+    groups = defaultdict(list)
+    for key, doc_type, link, docs in loaded:
+        if key in failed:
+            continue
         for doc in tqdm(docs, desc=f"{key} <- {link[-40:]}", unit="doc", leave=False):
             groups[key].extend(to_records(doc, doc_type, not args.no_contextualize, previous))
     if not groups:
@@ -161,7 +175,7 @@ def build(args) -> list[Path]:
             pickle.dump(records, f)
         print(f"{key}: {len(records)} chunks -> {path}")
         paths.append(path)
-    return paths
+    return paths, skipped
 
 
 def main():
@@ -169,8 +183,9 @@ def main():
         description="Preprocess the sources listed in sources.yaml into .pkl files without pushing them "
                     "(`python -m r_doc_builder.ingest --build` does both)")
     add_args(parser)
-    paths = build(parser.parse_args())
-    print(f"\npush with: python -m r_doc_builder.ingest {' '.join(str(p) for p in paths)} [--reset]")
+    paths, skipped = build(parser.parse_args())
+    # --reset would drop a skipped doc_type's chunks with nothing to replace them
+    print(f"\npush with: python -m r_doc_builder.ingest {' '.join(str(p) for p in paths)}{'' if skipped else ' [--reset]'}")
 
 
 if __name__ == "__main__":

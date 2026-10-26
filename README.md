@@ -53,8 +53,13 @@ split between doc_types.
 
 `doc_type` is the label r-doc-mcp filters on (declare the types in its `config/doc_types.yaml`).
 Omitted, blank or `none` inherits from the including `yaml` entry; entries that never get one are
-written to `untyped.pkl` and pushed without a `doc_type`. An entry whose link doesn't fit its type
-is warned and skipped; the build only fails when nothing at all was built.
+written to `untyped.pkl` and pushed without a `doc_type`. Each doc_type builds all or nothing: an
+entry that fails to load or loads no documents is warned and its whole doc_type skipped (nothing of
+it contextualized, written or pushed; the DB keeps its last good build, and r-doc-mcp's `/health`
+its older `last_ingest`), while the other doc_types build and push. The run ends naming the skipped
+doc_types; fix their entries and rebuild just those with `--build --sources <doc_type> ...`. `--reset`
+is refused when a doc_type was skipped, as it would leave that doc_type empty. A malformed entry
+(no `link`, a missing `yaml` include) stops the build before anything runs.
 
 `examples/bdc/sources.yaml` lists the NHLBI BioData Catalyst sources. Docs and website come from
 github.com/stagecc/bdc-llm, the Markdown export of the BDC GitBook and website (private: the clone

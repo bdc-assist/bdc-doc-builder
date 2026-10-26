@@ -130,7 +130,7 @@ class ApiSpy:
         return REAL_API_POST(path, payload)
 
     def writes(self):
-        return sum(n for path, n in self.counts.items() if path != "/ingest/lookup")
+        return sum(n for path, n in self.counts.items() if path not in ("/ingest/lookup", "/ingest/done"))
 
 
 class Workspace:
@@ -254,7 +254,7 @@ def _round(ws, kind, fault, state, python, llm_calls):
 
     before = {key(r, m) for r, m in _rows(sorted(ws.data.glob("*.pkl")))}
     llm_calls.clear()
-    built = [] if kind == "adhoc" else pipeline.build(_build_args(ws, partial))
+    built = [] if kind == "adhoc" else pipeline.build(_build_args(ws, partial))[0]
     built_rows = list(_rows(built))
     expected_llm = sum(1 for r, m in built_rows if key(r, m) not in before)
     assert len(llm_calls) == expected_llm, f"LLM calls: {len(llm_calls)}, expected {expected_llm}"
