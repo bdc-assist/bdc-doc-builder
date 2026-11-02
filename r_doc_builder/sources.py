@@ -228,15 +228,28 @@ def _repo_slug(url):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", re.sub(r"^\w+://|^git@|\.git$", "", url)).strip("_")
 
 
+def clone_dir(link):
+    """Where a git row's files are: a local directory link itself, else its clone under REPOS_DIR."""
+    url = link.partition("#")[0]
+    return Path(url) if Path(url).is_dir() else Path(REPOS_DIR) / _repo_slug(url)
+
+
+def head(clone):
+    """The commit a clone is at; None when there is none (not cloned yet, not a git repo, no git)."""
+    try:
+        r = subprocess.run(["git", "-C", str(clone), "rev-parse", "HEAD"], capture_output=True, text=True)
+    except OSError:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 def load_git(link, pull=False):
-    """Clone (depth 1) into REPOS_DIR/<slug>, or reuse the clone (pull only with --pull), then
-    load it like a path. link may end in #subdir, or #path/to/file for one file. A local directory
-    as link is used as the clone."""
+    """Clone (depth 1) into REPOS_DIR/<slug>, or reuse the clone (git pull --ff-only first when
+    pull: every build unless --no-pull), then load it like a path. link may end in #subdir, or
+    #path/to/file for one file. A local directory as link is used as the clone, never pulled."""
     url, _, subdir = link.partition("#")
-    if Path(url).is_dir():
-        clone = Path(url)
-    else:
-        clone = Path(REPOS_DIR) / _repo_slug(url)
+    clone = clone_dir(link)
+    if not Path(url).is_dir():
         if not clone.exists():
             clone.parent.mkdir(parents=True, exist_ok=True)
             try:  # core.longpaths: Windows' 260-char path limit otherwise breaks deep doc trees at checkout
@@ -245,7 +258,11 @@ def load_git(link, pull=False):
                 shutil.rmtree(clone, ignore_errors=True)  # a half-checked-out clone would be reused silently next run
                 raise
         elif pull:
-            subprocess.run(["git", "-C", str(clone), "-c", "core.longpaths=true", "pull", "--ff-only"], check=True)
+            try:
+                subprocess.run(["git", "-C", str(clone), "-c", "core.longpaths=true", "pull", "--ff-only"], check=True)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"git pull --ff-only failed in {clone} (offline? local changes or commits "
+                                   f"there?); to build from the clone as it is, pass --no-pull") from e
     root = clone / subdir if subdir else clone
     if not root.exists():
         raise ValueError(f"subdir not found in repo: {subdir or clone}")

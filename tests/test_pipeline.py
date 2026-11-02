@@ -267,7 +267,7 @@ def test_load_git_clones_once_pulls_on_request_and_links_to_github():
             assert [c[:2] for c in calls] == [["git", "clone"]]
             assert docs[0]["metadata"] == {"source": "g.md", "page_url": "https://github.com/org/repo/blob/HEAD/docs/g.md"}
             sources.load_git("https://github.com/org/repo#docs")
-            assert len(calls) == 1, "existing clone reused without --pull"
+            assert len(calls) == 1, "existing clone reused when not pulling (--no-pull)"
             (doc,) = sources.load_git("https://github.com/org/repo#docs/g.md")
             assert doc["metadata"] == {"source": "g.md", "page_url": "https://github.com/org/repo/blob/HEAD/docs/g.md"}, \
                 "#path/to/file loads that one file"
@@ -691,6 +691,44 @@ def test_build_exclude_splits_a_folder_between_doc_types():
     assert sources_of == {"page": ["index.md", "news/archive.md"], "update": ["2025/05/a.md"], "faq": ["faqs.md"]}, sources_of
 
 
+def test_partial_build_that_pulls_warns_about_older_doc_types():
+    """--sources a pulls the clone b also comes from: b's .pkl, kept from an earlier build, now holds
+    older content. A big warning names b and the command that rebuilds it; none for a full build,
+    with --no-pull, or for c, which comes from another clone."""
+    parser = argparse.ArgumentParser(); pipeline.add_args(parser)
+    assert parser.parse_args([]).pull is True and parser.parse_args(["--no-pull"]).pull is False
+    state = {"head": "old"}
+
+    def fake_load_row(source_type, link, pull=False):
+        if pull:
+            state["head"] = "new"  # the pull moved the clone
+        return [{"text": "# T\nt", "chunks": [{"content": "t"}], "metadata": {"source": f"{link[-1]}.md"}}]
+
+    original = sources.load_row, sources.head
+    sources.load_row = fake_load_row
+    sources.head = lambda clone: state["head"] if clone.name == "github.com_org_repo" else "other"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            _write(d / "sources.yaml", "- {source_type: git, doc_type: a, link: 'https://github.com/org/repo#a'}\n"
+                                       "- {source_type: git, doc_type: b, link: 'https://github.com/org/repo#b'}\n"
+                                       "- {source_type: git, doc_type: c, link: 'https://github.com/org/other#c'}\n")
+
+            def build(**kw):
+                err = io.StringIO()
+                with redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                    pipeline.build(_args(yaml=str(d / "sources.yaml"), data_dir=str(d / "out"), no_contextualize=True, **kw))
+                return err.getvalue()
+
+            assert "MIXED" not in build(), "a full build rebuilds every doc_type of the clone"
+            state["head"] = "old"
+            assert "MIXED" not in build(sources=["a"], pull=False), "no pull: nothing moved"
+            out = build(sources=["a"])
+            assert "MIXED SOURCE VERSIONS" in out and "--build --sources b   (or" in out, out
+    finally:
+        sources.load_row, sources.head = original
+
+
 def _contexts(*paths):
     found = {}
     for path in paths:
@@ -816,6 +854,7 @@ if __name__ == "__main__":
     test_build_groups_by_doc_type_and_filters_sources()
     test_build_skips_the_doc_type_of_a_source_with_no_documents()
     test_build_exclude_splits_a_folder_between_doc_types()
+    test_partial_build_that_pulls_warns_about_older_doc_types()
     test_fixture_corpus_builds_every_doc_type_offline()
     test_build_reuses_context_of_unchanged_documents()
     test_context_reuse_misses_when_prompt_or_model_changes()

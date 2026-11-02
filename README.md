@@ -46,7 +46,7 @@ split between doc_types.
 | `yaml` | another list like this one | one file per category is a tidy layout; its entries inherit this entry's doc_type unless they set their own |
 | `path` | local file or directory | `.md .mdx .txt .pdf`, recursive, dot-directories skipped; markdown is chunked by header; a frontmatter-only file is indexed from its fields; a frontmatter `url` (http/https) becomes the `page_url` |
 | `url` | one web page | main text extracted; `.pdf`/`.md`/`.txt` URLs are read as files |
-| `git` | repo URL, optional `#subdir` or `#path/to/file` | shallow-cloned into `data/repos/` (with `core.longpaths`, so deep trees work on Windows); `--pull` updates it; GitHub files get their GitHub page as `page_url` unless their frontmatter has a `url` |
+| `git` | repo URL, optional `#subdir` or `#path/to/file` | shallow-cloned into `data/repos/` (with `core.longpaths`, so deep trees work on Windows); pulled (`git pull --ff-only`) on every build, `--no-pull` builds from it as it is; GitHub files get their GitHub page as `page_url` unless their frontmatter has a `url` |
 | `youtube` | video, playlist or channel URL | captions via yt-dlp, chunked into timestamped windows |
 | `freshdesk` | help-center category or folder URL (`…/support/solutions/<id>`, `…/support/solutions/folders/<id>`) | public Freshdesk portal scrape, no API key; one document per article with `title`, `category`, `folder` metadata |
 | `transcripts` | YAML list of `{video_url, transcript}`: a local `.yaml` or a YAML URL | one document per YouTube video from its SRT transcript (a Drive link, URL or path next to the list); chunked like `youtube`, title/date from YouTube |
