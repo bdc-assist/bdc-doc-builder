@@ -13,14 +13,14 @@ All commands run from the repo root with `uv run`.
 - r-doc-mcp's API running with the same `INGEST_TOKEN`:
   `uv run uvicorn r_doc_mcp.api:app --port 8000` in that repo.
 - For `--build`: the sources listed in `sources.yaml` (git sources are cloned automatically
-  into `REPOS_DIR`), plus a completion LLM configured for the contextualizer unless you pass
+  into `REPOS_DIR`, and pulled on every build), plus a completion LLM configured for the contextualizer unless you pass
   `--no-contextualize`.
 
 ## `python -m r_doc_builder.ingest`
 
 ```text
 uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize] [--dry-run]
-        [--build [--yaml F] [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]]
+        [--build [--yaml F] [--sources S ...] [--no-contextualize] [--no-pull] [--data-dir D]]
 ```
 
 Pushes every supported file under `paths`. With `--build`, preprocesses first and pushes
@@ -38,7 +38,7 @@ required.
 | `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
 | `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
 | `--no-contextualize` | Skip the per-chunk LLM contextualizer. Much faster and cheaper; retrieval quality drops. |
-| `--pull` | `git pull --ff-only` existing clones of git sources. Without it, clones are reused as they are; missing clones are always cloned. |
+| `--no-pull` | Build from existing clones of git sources as they are. By default each build first runs `git pull --ff-only` in them (a failed pull fails that source; `--no-pull` gets past it); missing clones are always cloned. A `--sources` build that pulls new commits into a clone other doc_types also come from warns `MIXED SOURCE VERSIONS` and names them: their `.pkl` files hold the older content until rebuilt. |
 | `--data-dir D` | Where the `.pkl` files are written. Default `./data/<config>/`, the `CONFIG_DIR` folder name (`PREPROC_DATA_DIR`). |
 
 Without `--doc-type`, every chunk keeps the doc_type its record carries (set by the
@@ -65,7 +65,7 @@ Same, after pulling the latest commits into any existing git clones, without the
 contextualizer:
 
 ```bash
-uv run python -m r_doc_builder.ingest --build --pull --no-contextualize --reset
+uv run python -m r_doc_builder.ingest --build --no-contextualize --reset
 ```
 
 Refresh only the `docs` and `faq` doc_types. The two are re-preprocessed and upserted;
@@ -93,7 +93,7 @@ uv run python -m r_doc_builder.ingest ./some/pages --doc-type page
 ## `python -m r_doc_builder.pipeline`
 
 ```text
-uv run python -m r_doc_builder.pipeline [--yaml F] [--sources S ...] [--no-contextualize] [--pull] [--data-dir D]
+uv run python -m r_doc_builder.pipeline [--yaml F] [--sources S ...] [--no-contextualize] [--no-pull] [--data-dir D]
 ```
 
 Preprocessing only: writes `<data-dir>/<doc_type>.pkl` and never talks to the database.
@@ -105,7 +105,7 @@ from another. The options are the same ones `ingest --build` passes through.
 | `--yaml F` | Root source list. Default `<CONFIG_DIR>/sources.yaml`. |
 | `--sources S ...` | Which doc_types to build; `untyped` = rows without one. Default all. All yaml files are walked first, so a doc_type declared in an included file is selectable. |
 | `--no-contextualize` | Skip the per-chunk LLM contextualizer. Much faster and cheaper; retrieval quality drops. |
-| `--pull` | `git pull --ff-only` existing clones of git sources. Without it, clones are reused as they are; missing clones are always cloned. |
+| `--no-pull` | Build from existing clones of git sources as they are. By default each build first runs `git pull --ff-only` in them (a failed pull fails that source; `--no-pull` gets past it); missing clones are always cloned. A `--sources` build that pulls new commits into a clone other doc_types also come from warns `MIXED SOURCE VERSIONS` and names them: their `.pkl` files hold the older content until rebuilt. |
 | `--data-dir D` | Where the `.pkl` files are written. Default `./data/<config>/`, the `CONFIG_DIR` folder name (`PREPROC_DATA_DIR`). |
 
 Contextualizing reuses the previous build: a chunk whose text and document are unchanged since
@@ -204,7 +204,7 @@ for the embedding endpoint.
    and the production push both use these files:
 
    ```bash
-   CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.pipeline --pull
+   CONFIG_DIR=examples/bdc uv run python -m r_doc_builder.pipeline
    ```
 
 1. **Copy the database.** Stop writes to it first (scale the r-doc-mcp deployment to zero, or make
@@ -265,7 +265,7 @@ for the embedding endpoint.
 6. **Kill a run**: copy `data/bdc/` to `./rehearsal-data` and do everything below with
    `--data-dir ./rehearsal-data` (build and push), so no test edit reaches production. Restart the
    8100 server, edit a few pages in a source clone, rebuild
-   (`--build --sources <type> --data-dir ./rehearsal-data`), start the push of `./rehearsal-data` and stop
+   (`--build --sources <type> --data-dir ./rehearsal-data --no-pull`: a pull would fail on the edits or mix in newer commits), start the push of `./rehearsal-data` and stop
    it part-way (Ctrl-C, or drop the port-forward), rerun it, then repeat step 5 with a new, empty
    `./oracle-db` and every `.pkl` file of `./rehearsal-data`, so the fresh push holds the edits too.
    End by undoing the clone edits: `git -C data/repos/<clone> checkout .`.

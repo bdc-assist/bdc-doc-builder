@@ -117,8 +117,9 @@ def add_args(parser):
                         help=f"doc_types to build; '{UNTYPED}' = rows without one (default: all)")
     parser.add_argument("--no-contextualize", action="store_true",
                         help="skip the LLM contextualizer (much faster/cheaper, weaker retrieval)")
-    parser.add_argument("--pull", action="store_true",
-                        help="git pull --ff-only existing clones of git sources (default: reuse as-is)")
+    parser.add_argument("--pull", action=argparse.BooleanOptionalAction, default=True,
+                        help="git pull --ff-only existing clones of git sources first (default); "
+                             "--no-pull builds from them as they are")
     parser.add_argument("--data-dir", default=PREPROC_DATA_DIR, help="where the .pkl files go (default: %(default)s)")
 
 
@@ -135,6 +136,10 @@ def build(args) -> tuple[list[Path], list[str]]:
         sys.exit(f"build stopped, nothing written: {e}")
     wanted = None if "all" in args.sources else set(args.sources)
     out_dir = Path(args.data_dir)
+    # each git row's doc_type and clone, and the commit each clone is at before this build pulls it
+    git_rows = [(doc_type or UNTYPED, sources.clone_dir(link)) for source_type, doc_type, link, *_ in rows
+                if source_type == "git"]
+    before = {clone: sources.head(clone) for clone in {clone for _, clone in git_rows}}
     loaded, failed = [], set()
     for source_type, doc_type, link, where, exclude in tqdm(rows, desc="sources", unit="row"):
         key = doc_type or UNTYPED
@@ -175,7 +180,26 @@ def build(args) -> tuple[list[Path], list[str]]:
             pickle.dump(records, f)
         print(f"{key}: {len(records)} chunks -> {path}")
         paths.append(path)
+    warn_mixed_versions(git_rows, before, set(groups), out_dir)
     return paths, skipped
+
+
+def warn_mixed_versions(git_rows, before, built, out_dir):
+    """A partial build (--sources) that pulled new commits into a clone, or cloned it afresh, while
+    other doc_types of the same clone keep .pkl files from an earlier build: those now hold older
+    content than the ones just built. Says which, and the command that rebuilds them."""
+    moved = {clone for clone, commit in before.items() if sources.head(clone) != commit}
+    stale = sorted({key for key, clone in git_rows if clone in moved and key not in built
+                    and (out_dir / f"{key}.pkl").exists()})
+    if not stale:
+        return
+    clones = sorted({clone.name for key, clone in git_rows if key in stale and clone in moved})
+    bar = "!" * 100
+    warn("\n".join([
+        "MIXED SOURCE VERSIONS", bar,
+        f"  This build moved {', '.join(clones)} to a newer commit, but {', '.join(stale)} also come from it",
+        f"  and were not rebuilt: their .pkl files in {out_dir} still hold the older content.",
+        f"  Rebuild them too:  --build --sources {' '.join(stale)}   (or build without pulling: --no-pull)", bar]))
 
 
 def main():
