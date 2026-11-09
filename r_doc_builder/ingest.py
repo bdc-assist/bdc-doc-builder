@@ -197,12 +197,31 @@ def _with_removals(meta, old):
     return {**meta, **{k: None for k in old.keys() - meta.keys()}}
 
 
-def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, dry_run: bool = False) -> int:
+def _prune(loaded, dry_run):
+    """--prune: delete the stored documents of the pushed .pkl files' doc_types that no pushed file
+    produces any more (removed from their source). Only .pkl doc_types: a pipeline .pkl holds its whole
+    doc_type, an ad-hoc file does not. Untyped chunks can't be asked for by doc_type, so stay."""
+    types = sorted({m["doc_type"] for f, _, metas, _ in loaded if f.suffix == ".pkl" for m in metas if m.get("doc_type")})
+    if not types:
+        return
+    kept = {(m.get("source"), m.get("page_url")) for _, _, metas, _ in loaded for m in metas}
+    stored = _api_post("/ingest/lookup", {"sources": [], "doc_types": types})
+    stale = {cid: m for cid, m in stored.items() if (m.get("source"), m.get("page_url")) not in kept}
+    print(f"prune {', '.join(types)}: {len(stale)} chunks of documents no longer in any source")
+    for source, n in sorted(Counter(m.get("source") for m in stale.values()).items()):
+        print(f"  {'would delete' if dry_run else 'deleting'} {n} chunks of {source}")
+    if not dry_run:
+        _post_batches("/ingest/delete", sorted(stale))
+
+
+def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, dry_run: bool = False,
+                 prune: bool = False) -> int:
     """Load, embed, and push all supported files under the given paths, embedding only what the DB
     doesn't hold yet: unchanged chunks are skipped, metadata-only changes updated in place, and
     chunks a pushed document no longer produces deleted. doc_type, when given, applies to every
     chunk; otherwise records keep the doc_type they carry (none for ad-hoc files).
     dry_run: report what each file would cost, then move on: no embedding, no writes.
+    prune: then delete documents of the pushed doc_types that are gone from their source (see _prune).
     Returns the number of chunks embedded."""
     emb = get_emb()
     model = getattr(emb, "model", None) or ""
@@ -248,6 +267,8 @@ def ingest_paths(paths, doc_type: str | None = None, use_summary: bool = False, 
         # the file is fully stored, changed or not: its doc_types' last successful ingest, for r-doc-mcp's /health
         _api_post("/ingest/done", {"doc_types": sorted({m.get("doc_type") or pipeline.UNTYPED for m in metas})})
         total += len(embed)
+    if prune:  # last, once every file is stored: a failed push never prunes
+        _prune(loaded, dry_run)
     return total
 
 
@@ -263,6 +284,9 @@ def main(argv=None):
                         help="embed an LLM summary for .pkl records lacking a contextualized chunk")
     parser.add_argument("--dry-run", action="store_true",
                         help="report what the push would embed, update and delete, then stop: no embedding, no writes")
+    parser.add_argument("--prune", action="store_true",
+                        help="after pushing, delete stored documents of the pushed .pkl doc_types that no longer "
+                             "come from any source (a cheaper --reset)")
     build = parser.add_argument_group(
         "build from source",
         "--build runs pipeline first and pushes what it wrote; the other options here pass through to it")
@@ -280,7 +304,7 @@ def main(argv=None):
                  f"above); fix the sources, or push without --reset")
     if args.reset:
         reset_remote()
-    total = ingest_paths(built + args.paths, args.doc_type, args.summarize, args.dry_run)
+    total = ingest_paths(built + args.paths, args.doc_type, args.summarize, args.dry_run, args.prune)
     print("dry run: nothing embedded or written" if args.dry_run
           else f"done: embedded {total} chunks; {DOC_MCP_URL} is up to date")
     if skipped:

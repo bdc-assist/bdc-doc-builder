@@ -51,7 +51,8 @@ class FakeServer:
         self.calls.append((path, payload))
         if path == "/ingest/lookup":
             return {cid: dict(r["metadata"]) for cid, r in self.rows.items()
-                    if r["metadata"].get("source") in payload["sources"]}
+                    if r["metadata"].get("source") in payload["sources"]
+                    or r["metadata"].get("doc_type") in payload.get("doc_types", [])}
         if path == "/ingest/upsert":
             for c in payload:
                 old = self.rows.get(c["id"], {}).get("metadata", {})
@@ -504,6 +505,34 @@ def test_chunks_a_document_dropped_are_deleted_and_nothing_else():
         "deletes go last, after the replacements are stored; the ingest time once all is stored"
 
 
+def test_prune_deletes_documents_gone_from_their_source_and_nothing_else():
+    """--prune drops stored documents of the pushed .pkl doc_types that no pushed file produces;
+    other doc_types, untyped chunks and documents pushed from another file stay. Dry run only reports."""
+    server, emb = FakeServer(), CountingEmb()
+    _push(server, emb, [_row("a", "a.md", doc_type="docs"), _row("gone", "gone.md", doc_type="docs")])
+    _push(server, emb, [_row("faq", "faq.md", doc_type="faq")], name="faq.pkl")
+    _push(server, emb, [_row("loose", "loose.md")], name="untyped.pkl")
+    before = {k: dict(v) for k, v in server.rows.items()}
+    out = io.StringIO()
+    with redirect_stdout(out):
+        _push(server, emb, [_row("a", "a.md", doc_type="docs")], dry_run=True, prune=True)
+    assert server.rows == before, "a dry run deletes nothing"
+    assert "would delete 1 chunks of gone.md" in out.getvalue(), out.getvalue()
+    with redirect_stdout(io.StringIO()):
+        _push(server, emb, [_row("a", "a.md", doc_type="docs")], prune=True)
+    assert sorted(r["content"] for r in server.rows.values()) == ["a", "faq", "loose"]
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "x.md").write_text("# X\n\nad hoc", encoding="utf-8")
+        originals = (ingest._api_post, ingest.get_emb)
+        ingest._api_post, ingest.get_emb = server.post, (lambda: emb)
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                ingest.ingest_paths([Path(d)], doc_type="faq", prune=True)
+        finally:
+            ingest._api_post, ingest.get_emb = originals
+    assert "faq" in [r["content"] for r in server.rows.values()], "an ad-hoc file never prunes its doc_type"
+
+
 def test_killed_push_resumes_without_reembedding_what_was_stored():
     server, rows = FakeServer(), [_row(f"chunk {n}") for n in range(5)]
     original_batch, ingest.PUSH_BATCH = ingest.PUSH_BATCH, 2
@@ -528,7 +557,7 @@ def test_main_build_runs_pipeline_then_reset_then_push():
     originals = (pipeline.build, ingest.reset_remote, ingest.ingest_paths)
     pipeline.build = lambda args: calls.append(("build", args.sources, args.no_contextualize)) or ([Path("data/docs.pkl")], [])
     ingest.reset_remote = lambda: calls.append(("reset",))
-    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False: calls.append(("push", [str(p) for p in paths])) or 0
+    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False, prune=False: calls.append(("push", [str(p) for p in paths])) or 0
     try:
         ingest.main(["--build", "--sources", "docs", "--no-contextualize", "--reset", "extra.md"])
     finally:
@@ -579,7 +608,7 @@ def test_dry_run_reports_and_writes_nothing():
 def test_main_dry_run_passes_through_and_refuses_reset():
     seen = []
     original = ingest.ingest_paths
-    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False: seen.append(dry_run) or 0
+    ingest.ingest_paths = lambda paths, doc_type=None, use_summary=False, dry_run=False, prune=False: seen.append(dry_run) or 0
     try:
         ingest.main(["x.pkl", "--dry-run"])
     finally:
@@ -655,6 +684,7 @@ if __name__ == "__main__":
     test_metadata_only_change_updates_in_place()
     test_changed_embedded_text_or_model_reembeds()
     test_chunks_a_document_dropped_are_deleted_and_nothing_else()
+    test_prune_deletes_documents_gone_from_their_source_and_nothing_else()
     test_killed_push_resumes_without_reembedding_what_was_stored()
     test_dry_run_reports_and_writes_nothing()
     test_main_dry_run_passes_through_and_refuses_reset()

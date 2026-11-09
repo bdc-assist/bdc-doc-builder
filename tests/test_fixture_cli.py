@@ -1,7 +1,7 @@
 """The fixture rehearsal: the real ingest CLI, run as subprocesses the way an operator runs it, against a
 real r-doc-mcp serving the fake "fixture" collection from a temporary DB. Builds and pushes the fake
 corpus (examples/fixture), rebuilds and pushes again (nothing to do), edits three files and checks that
---dry-run predicts the push exactly, checks search, then compares the DB with a fresh push into an
+--dry-run predicts the push exactly, deletes a file and checks --prune drops it, checks search, then compares the DB with a fresh push into an
 empty one. A copy of the corpus is edited, never the committed files.
 
 Offline by default: both sides use EMBEDDING_MODEL_PROVIDER=fake. FIXTURE_EMBEDDINGS=real uses the
@@ -101,6 +101,13 @@ def test_fixture_rehearsal():
         for f, (embed, update, _, delete) in pushed.items():
             assert (embed, update, delete) == changed.get(f, (0, 0, 0)), (f, pushed[f])
         assert requests.get(url + "/health").json()["documents"] == total - 1, "one page section fewer"
+
+        # 3b. a one-chunk source file deleted: a plain push keeps its document, --prune drops it
+        (cfg / "events" / "event-2024-11-cohort-webinar.md").unlink()
+        _ingest(url, cfg, *build, data)
+        assert requests.get(url + "/health").json()["documents"] == total - 1, "a plain push never prunes"
+        _ingest(url, cfg, *build, "--prune", data)
+        assert requests.get(url + "/health").json()["documents"] == total - 2, "--prune drops the removed event"
 
         # 4. search: a chunk's own text finds it; keyword mode and the date filter work on real shapes
         with open(data / "docs.pkl", "rb") as f:
