@@ -97,6 +97,18 @@ push from scratch:
 uv run python -m r_doc_builder.ingest --build --reset
 ```
 
+Daily update of everything (with `CONFIG_DIR` set to the config you serve, e.g. `examples/bdc`):
+
+```bash
+uv run python -m r_doc_builder.ingest --build --prune
+```
+
+It pulls the git sources, rebuilds every doc_type and pushes; only changed chunks are
+re-contextualized and re-embedded, so a quiet day costs almost nothing. `--prune` then deletes
+documents removed from their sources. Safe unattended: a doc_type whose source fails is skipped,
+neither pushed nor pruned, and the DB keeps its last good copy. Still run a `--build --reset` after
+removing a whole doc_type from `sources.yaml` or changing the embedding model or `build.yaml`.
+
 Build with `pipeline`, push with `ingest` (inspect the `.pkl` files in between). Git clones under
 `data/repos/` are skipped; only the `.pkl` files (and any ad-hoc files you drop in `data/`) are
 pushed. Builds land in `data/<config>/`, named after the `CONFIG_DIR` folder (`data/config/` for
@@ -112,6 +124,9 @@ Refresh one doc_type, leaving the rest of the DB as it is:
 ```bash
 uv run python -m r_doc_builder.ingest --build --sources faq
 ```
+
+Add `--prune` to also delete that doc_type's documents that no longer come from any source (deleted or
+renamed pages) without a full `--reset`; `--dry-run` shows what it would delete.
 
 `--no-contextualize` skips the per-chunk LLM call (much faster, weaker retrieval). Every flag
 and environment variable is in [docs/cli.md](docs/cli.md).

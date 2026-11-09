@@ -19,7 +19,7 @@ All commands run from the repo root with `uv run`.
 ## `python -m r_doc_builder.ingest`
 
 ```text
-uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--summarize] [--dry-run]
+uv run python -m r_doc_builder.ingest [paths ...] [--doc-type T] [--reset] [--prune] [--summarize] [--dry-run]
         [--build [--yaml F] [--sources S ...] [--no-contextualize] [--no-pull] [--data-dir D]]
 ```
 
@@ -32,6 +32,7 @@ required.
 | `paths` | Files or directories. Directories are searched recursively for `.pkl .md .mdx .txt .pdf`. |
 | `--doc-type T` | `doc_type` metadata for every chunk pushed in this run. Default: whatever each record carries. |
 | `--reset` | Drop the remote collection before pushing. Runs after `--build` finishes, so a failed build leaves the DB untouched. |
+| `--prune` | After the push, delete stored documents of the doc_types in the pushed `.pkl` files that no pushed file produces any more (removed from their source): a `--reset` that re-embeds nothing. Ad-hoc files never prune, untyped chunks are never pruned, and a doc_type not pushed is not touched. With `--dry-run`, only reports what it would delete. |
 | `--summarize` | For `.pkl` records with no contextualized chunk, embed an LLM summary of the content instead of the raw content. One LLM call per record. |
 | `--dry-run` | Report what the push would embed, update and delete (and which sources would lose chunks), then stop: nothing embedded, nothing written. Not with `--reset`. With `--build` the pipeline still runs and writes its `.pkl` files; with `--summarize` the summary LLM calls are still made. |
 | `--build` | Run the preprocessing pipeline before pushing. The options below are passed through to it. |
@@ -73,6 +74,13 @@ everything else in the DB stays as it is:
 
 ```bash
 uv run python -m r_doc_builder.ingest --build --sources docs faq
+```
+
+Same, and drop the documents of those two doc_types that were deleted or renamed in their sources
+(check with `--dry-run` first):
+
+```bash
+uv run python -m r_doc_builder.ingest --build --sources docs faq --prune
 ```
 
 Re-push the existing `data/<config>/*.pkl` without re-preprocessing, for example after switching
@@ -140,7 +148,7 @@ uv run python -m r_doc_builder.ingest data/faq.pkl
   Each file prints `N to embed, N to update, N unchanged, N to delete`.
 - Chunks a pushed document no longer produces are deleted, after its new chunks are stored.
   Documents that are not part of the push are never touched; a document removed from its source
-  entirely stays in the DB until `--reset`: run a `--build --reset` now and then.
+  entirely stays in the DB until a push with `--prune` (or `--reset`).
 - A document (same `source` and `page_url`) present in two pushed files is refused before anything
   is written: it is usually a stale `.pkl` left by a renamed or emptied doc_type. Delete it.
 - Chunks are embedded (about `EMBEDDING_BATCH_TOKENS` tokens per request) and upserted
