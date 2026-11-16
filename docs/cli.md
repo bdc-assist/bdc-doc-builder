@@ -174,7 +174,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `DOC_MCP_URL` | push | r-doc-mcp base URL (`.env.example` uses `http://127.0.0.1:8001`) |
+| `DOC_MCP_URL` | push | r-doc-mcp base URL (default `http://127.0.0.1:8001`) |
 | `INGEST_TOKEN` | push | Bearer token; must match the server's |
 | `PUSH_BATCH` | push | Chunks per upsert request, the resume slice size, and the batch size of lookup/update/delete requests (default 200) |
 | `PUSH_TIMEOUT` | push | Seconds allowed for one ingest API request (default 300) |
