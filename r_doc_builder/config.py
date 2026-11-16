@@ -42,7 +42,7 @@ COMPLETION_TIMEOUT = int(os.getenv("COMPLETION_TIMEOUT", "120"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "60"))  # one source download (sources.py)
 SUMMARY_MIN_CHARS = int(os.getenv("SUMMARY_MIN_CHARS", "300"))  # ingest --summarize: shorter texts are embedded as-is
 # r-doc-mcp ingest API (ingest.py): where built content is pushed, and how
-DOC_MCP_URL = os.getenv("DOC_MCP_URL", "http://127.0.0.1:8000").rstrip("/")
+DOC_MCP_URL = os.getenv("DOC_MCP_URL", "http://127.0.0.1:8001").rstrip("/")
 INGEST_TOKEN = os.getenv("INGEST_TOKEN", "")  # must match INGEST_TOKEN on the r-doc-mcp side
 PUSH_BATCH = int(os.getenv("PUSH_BATCH", "200"))  # chunks per upsert request
 PUSH_TIMEOUT = int(os.getenv("PUSH_TIMEOUT", "300"))  # one ingest API request
