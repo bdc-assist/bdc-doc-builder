@@ -55,6 +55,7 @@ def test_reasoning_effort_settings():
 
     keys = ("COMPLETION_REASONING_EFFORT", "COMPLETION_TEMPERATURE", "COMPLETION_MODEL_PROVIDER", "OPENAI_API_KEY")
     saved = {k: os.environ.get(k) for k in keys}
+    module = dict(vars(config))  # reload makes new objects; other modules keep the old ones
     os.environ.update(COMPLETION_TEMPERATURE="0", COMPLETION_MODEL_PROVIDER="openai", OPENAI_API_KEY="test")
     try:
         for value, effort, temperature in [("", None, 0.0), ("none", "none", 0.0), ("medium", "medium", None)]:
@@ -69,7 +70,7 @@ def test_reasoning_effort_settings():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        importlib.reload(config)
+        vars(config).update(module)  # not a reload: later tests check `x is config.X`
 
 
 def test_provider_selection_and_temperature_reach_every_client():
@@ -93,6 +94,7 @@ def test_provider_selection_and_temperature_reach_every_client():
          ("ChatOllama", "base_url")),  # explicit provider wins; a trailing .env comment is dropped
     ]
     saved = {k: os.environ.get(k) for k in base}
+    module = dict(vars(config))  # reload makes new objects; other modules keep the old ones
     try:
         os.environ.update(base)
         importlib.reload(config)
@@ -118,7 +120,7 @@ def test_provider_selection_and_temperature_reach_every_client():
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-        importlib.reload(config)
+        vars(config).update(module)  # not a reload: later tests check `x is config.X`
 
 
 if __name__ == "__main__":
