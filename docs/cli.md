@@ -10,8 +10,8 @@ All commands run from the repo root with `uv run`.
 ## Before you start
 
 - `.env` filled in (`cp .env.example .env`). See [Environment](#environment).
-- r-doc-mcp's API running with the same `INGEST_TOKEN`:
-  `uv run uvicorn r_doc_mcp.api:app --port 8000` in that repo.
+- r-doc-mcp running with the same `INGEST_TOKEN`: `uv run python -m r_doc_mcp.mcp_server --http`
+  in that repo (one process on port 8001 serving `/mcp` and `/ingest/*`).
 - For `--build`: the sources listed in `sources.yaml` (git sources are cloned automatically
   into `REPOS_DIR`, and pulled on every build), plus a completion LLM configured for the contextualizer unless you pass
   `--no-contextualize`.
@@ -174,7 +174,7 @@ Read from `.env`; real environment variables win. The full list with comments is
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `DOC_MCP_URL` | push | r-doc-mcp base URL (default `http://127.0.0.1:8000`) |
+| `DOC_MCP_URL` | push | r-doc-mcp base URL (`.env.example` uses `http://127.0.0.1:8001`) |
 | `INGEST_TOKEN` | push | Bearer token; must match the server's |
 | `PUSH_BATCH` | push | Chunks per upsert request, the resume slice size, and the batch size of lookup/update/delete requests (default 200) |
 | `PUSH_TIMEOUT` | push | Seconds allowed for one ingest API request (default 300) |

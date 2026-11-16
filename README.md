@@ -87,8 +87,9 @@ language) is in `build.yaml` next to it; rebuild with `--reset` after changing i
 
 ## Build & push
 
-`r_doc_builder.ingest` is the CLI. r-doc-mcp's API must be running
-(`uv run uvicorn r_doc_mcp.api:app --port 8000` over there) with the same `INGEST_TOKEN` set.
+`r_doc_builder.ingest` is the CLI. r-doc-mcp must be running
+(`uv run python -m r_doc_mcp.mcp_server --http` over there, port 8001, which also serves `/ingest/*`)
+with the same `INGEST_TOKEN` set.
 
 List your sources in `config/sources.yaml` (every entry in the template is commented out), then build and
 push from scratch:
