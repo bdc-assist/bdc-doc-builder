@@ -9,4 +9,5 @@
 - {source_type: path, doc_type: event, link: events}
 - {source_type: path, doc_type: fellow, link: fellows}
 - {source_type: path, doc_type: faq, link: faq}
+- {source_type: path, doc_type: form, link: pages, fence: form}   # join-platform.md's ```form block
 - {source_type: transcripts, doc_type: video, link: videos.yaml}   # made-up YouTube ids, local SRT files

@@ -114,7 +114,7 @@ def test_fixture_rehearsal():
             chunk = pickle.load(f)[0]["content"]
         assert _search(url, query=chunk)[0]["content"] == chunk
         hits = _search(url, query="PIC-SURE", mode="keyword")
-        assert hits and all(h["metadata"]["doc_type"] in {"docs", "page", "faq", "video"} for h in hits), hits
+        assert hits and all(h["metadata"]["doc_type"] in {"docs", "page", "faq", "video", "form"} for h in hits), hits
         assert any("PIC-SURE" in h["content"] for h in hits), hits
         dated = _search(url, query="workshop webinar", mode="keyword", date_from="2025-01-01")
         assert dated and all(h["metadata"]["date_num"] >= 20250101 for h in dated), dated

@@ -10,6 +10,8 @@ import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # not installed: package sits at the repo root
 
 from r_doc_builder import contextualize
@@ -426,7 +428,7 @@ def test_read_rows_comments_relative_paths_and_inheritance():
                "- {source_type: url, doc_type: ' ', link: https://x/a}\n"
                "- {source_type: URL, doc_type: none, link: https://x/b}\n"
                "- {source_type: path, doc_type: docs, link: local, exclude: [a/*, b.md]}\n"
-               "- {source_type: url, link: https://x/c, exclude: c*}\n")
+               "- {source_type: url, link: https://x/c, exclude: c*, fence: ' form '}\n")
         _write(d / "sub" / "faq.yaml",
                "- {source_type: url, link: https://x/f1}\n"
                "- {source_type: url, doc_type: other, link: https://x/f2}\n"
@@ -434,7 +436,7 @@ def test_read_rows_comments_relative_paths_and_inheritance():
         err = io.StringIO()
         with redirect_stderr(err):
             rows = pipeline.read_rows(d / "sources.yaml")
-    assert [(t, dt, link) for t, dt, link, _, _ in rows] == [
+    assert [(t, dt, link) for t, dt, link, *_ in rows] == [
         ("url", "faq", "https://x/f1"),          # inherited from the yaml entry
         ("url", "other", "https://x/f2"),        # included file's own doc_type wins
         ("url", None, "https://x/a"),            # blank -> none
@@ -444,6 +446,7 @@ def test_read_rows_comments_relative_paths_and_inheritance():
     ]
     assert rows[0][3].endswith("faq.yaml[1]"), "where = file[entry] for warnings"
     assert [r[4] for r in rows] == [(), (), (), (), ("a/*", "b.md"), ("c*",)], "exclude: a list, a lone glob, or none"
+    assert [r[5] for r in rows] == [None] * 5 + ["form"], "fence: an info string, stripped, or none"
     assert re.search(r"faq\.yaml\[3\]: .*already included", err.getvalue()), err.getvalue()
 
 
@@ -453,6 +456,8 @@ def test_read_rows_refuses_bad_entries():
            "- {source_type: yaml, doc_type: x, link: notyaml.txt}\n",
            "- {source_type: url, doc_type: x}\n",
            "- {source_type: url, doc_type: x, link: https://x, exclude: {a: 1}}\n",
+           "- {source_type: url, doc_type: x, link: https://x, fence: [form]}\n",
+           "- {source_type: url, doc_type: x, link: https://x, fence: ' '}\n",
            "- just a string\n",
            "source_type: url\nlink: https://x\n"]  # a mapping, not a list
     with tempfile.TemporaryDirectory() as d:
@@ -597,7 +602,7 @@ def test_load_transcripts_reads_yaml_list():
 
 
 def test_fixture_corpus_builds_every_doc_type_offline():
-    """examples/fixture (fake, BDC-shaped) builds offline into all seven doc_types with the metadata
+    """examples/fixture (fake, BDC-shaped) builds offline into all eight doc_types with the metadata
     shapes real BDC data has, and extras.yaml adds the shapes only networked sources produce. Guards the
     corpus the fixture rehearsal and the e2e test push."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -640,6 +645,9 @@ def test_fixture_corpus_builds_every_doc_type_offline():
         for r in rows:
             owners.setdefault((r["metadata"]["source"], r["metadata"]["page_url"]), set()).add(t)
     assert all(len(ts) == 1 for ts in owners.values()), "no document in two doc_types: ingest refuses that"
+    [form] = recs["form"]  # join-platform.md's ```form block, a document apart from the page it sits in
+    assert form["metadata"]["source"] == "join-platform.md#form" and form["metadata"]["title"] == "Join the platform"
+    assert [f["name"] for f in yaml.safe_load(form["content"])["fields"]] == ["full_name", "study"]
     assert {"category", "folder", "title", "date", "date_num", "start_seconds", "timestamp_url"} <= keys(extras)
     assert any(r["metadata"].get("start_seconds") == 12.345 for r in extras), "a float float32 can't hold exactly"
     assert not {(r["metadata"]["source"], r["metadata"]["page_url"]) for r in extras} & set(owners), \
@@ -653,6 +661,20 @@ def test_fixture_corpus_builds_every_doc_type_offline():
             raise AssertionError("an unquoted date must be refused, not silently dropped at push time")
         except ValueError as e:
             assert "quote dates" in str(e), e
+
+
+def test_fenced_keeps_only_blocks_with_that_info_string():
+    """bdc-llm's ```form blocks: a `fence` entry keeps each as one whole chunk of a '#form' document, with the
+    page's text as its context; documents without one are dropped."""
+    text = ("# Get help\nIntro\n\n```python\nx = 1\n```\n\n```form\nurl: u\nfields: []\n```\n\n"
+            "~~~ form \nsecond: 2\n````\nstill: in\n~~~~\n\n```form\n```\n")
+    page = {"text": text, "chunks": [{"content": "Intro"}], "metadata": {"source": "help.md", "page_url": "https://x/help/"}}
+    other = {"text": "no forms here", "chunks": [{"content": "c"}], "metadata": {"source": "o.md", "page_url": "o.md"}}
+    [doc] = sources.fenced([page, other], "form")
+    assert doc["chunks"] == [{"content": "url: u\nfields: []"}, {"content": "second: 2\n````\nstill: in"}], \
+        "other info strings and empty blocks skipped; a fence closes only on its own character, at least as long"
+    assert doc["metadata"] == {"source": "help.md#form", "page_url": "https://x/help/"} and doc["text"] == text
+    assert page["metadata"]["source"] == "help.md", "the page's own document is untouched"
 
 
 def test_build_skips_the_doc_type_of_a_source_with_no_documents():
@@ -852,6 +874,7 @@ if __name__ == "__main__":
     test_read_rows_refuses_bad_entries()
     test_to_records_merges_metadata_and_contextualizes()
     test_build_groups_by_doc_type_and_filters_sources()
+    test_fenced_keeps_only_blocks_with_that_info_string()
     test_build_skips_the_doc_type_of_a_source_with_no_documents()
     test_build_exclude_splits_a_folder_between_doc_types()
     test_partial_build_that_pulls_warns_about_older_doc_types()

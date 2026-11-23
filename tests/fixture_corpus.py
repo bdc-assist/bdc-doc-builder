@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 FIXTURE = Path(__file__).resolve().parent.parent / "examples" / "fixture"
-DOC_TYPES = {"docs", "page", "update", "event", "fellow", "faq", "video"}
+DOC_TYPES = {"docs", "page", "update", "event", "fellow", "faq", "video", "form"}
 
 
 def write_extras(dest_dir, source=FIXTURE / "extras.yaml"):

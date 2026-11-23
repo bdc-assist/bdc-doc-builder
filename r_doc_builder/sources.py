@@ -96,6 +96,22 @@ def chunk_text(text):
     return [{"content": c} for c in _splitter.split_text(text)]
 
 
+def fenced(docs, info):
+    """Documents -> only their ```<info> fenced blocks (a sources entry's `fence`, e.g. bdc-llm's ```form):
+    one document per document that has any, each block's body one whole chunk, the full text still its
+    context. source gets a '#<info>' suffix: the same file is also a document of another entry, with the
+    same source and page_url, and ingest tells documents apart by those two."""
+    block = re.compile(rf"^ {{0,3}}(`{{3,}}|~{{3,}})[ \t]*{re.escape(info)}[ \t]*\n(.*?)^ {{0,3}}\1[`~]*[ \t]*$",
+                       re.M | re.S)
+    out = []
+    for doc in docs:
+        chunks = [{"content": body} for m in block.finditer(doc["text"]) if (body := m.group(2).strip())]
+        if chunks:
+            meta = {**doc["metadata"], "source": f"{doc['metadata']['source']}#{info}"}
+            out.append({"text": doc["text"], "chunks": chunks, "metadata": meta})
+    return out
+
+
 def read_pdf(src):
     """src: path or file-like. -> (all pages' text, chunks tagged with their 1-based page)."""
     from pypdf import PdfReader

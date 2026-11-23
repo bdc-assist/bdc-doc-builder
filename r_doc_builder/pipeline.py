@@ -1,11 +1,12 @@
 """sources.yaml -> data/<config>/<doc_type>.pkl, <config> = the CONFIG_DIR folder name. Never touches the DB;
 pushing is ingest.py's job.
 
-sources.yaml is a list of entries {source_type, doc_type, link, exclude?}. source_type is one of yaml,
+sources.yaml is a list of entries {source_type, doc_type, link, exclude?, fence?}. source_type is one of yaml,
 path, url, git, youtube, transcripts, freshdesk. doc_type is free text; omitted, blank or 'none' inherits the doc_type
 of the `yaml` entry that included this file (entries that never get one land in untyped.pkl
 with no doc_type). link is relative to the file it appears in. exclude: a glob or list of globs;
 documents whose source (a path/git directory's file path relative to the link) matches one are dropped.
+fence: a fenced-code info string (e.g. form); the entry keeps only those blocks, see sources.fenced.
 """
 import argparse
 import pickle
@@ -27,7 +28,7 @@ _REMOTE = ("http://", "https://", "ssh://", "git@")
 
 
 def read_rows(path, inherited=None, _seen=None):
-    """Walk a sources yaml and the yaml files it includes -> [(source_type, doc_type|None, link, where, exclude)].
+    """Walk a sources yaml and the yaml files it includes -> [(source_type, doc_type|None, link, where, exclude, fence|None)].
     A malformed entry raises ValueError: every source listed must build; other entries are validated
     later by sources.load_row."""
     path = Path(path)
@@ -51,6 +52,9 @@ def read_rows(path, inherited=None, _seen=None):
         exclude = [exclude] if isinstance(exclude, str) else exclude
         if not isinstance(exclude, list):
             raise ValueError(f"{where}: exclude must be a glob or a list of globs")
+        fence = entry.get("fence")
+        if fence is not None and not (isinstance(fence, str) and fence.strip()):
+            raise ValueError(f"{where}: fence must be a fenced-code info string, e.g. form")
         if doc_type.lower() in ("", "none"):
             doc_type = inherited
         if not link.startswith(_REMOTE):
@@ -63,7 +67,7 @@ def read_rows(path, inherited=None, _seen=None):
                 continue
             rows.extend(read_rows(link, doc_type, _seen))
         else:
-            rows.append((source_type, doc_type, link, where, tuple(str(g) for g in exclude)))
+            rows.append((source_type, doc_type, link, where, tuple(str(g) for g in exclude), fence and fence.strip()))
     return rows
 
 
@@ -141,7 +145,7 @@ def build(args) -> tuple[list[Path], list[str]]:
                 if source_type == "git"]
     before = {clone: sources.head(clone) for clone in {clone for _, clone in git_rows}}
     loaded, failed = [], set()
-    for source_type, doc_type, link, where, exclude in tqdm(rows, desc="sources", unit="row"):
+    for source_type, doc_type, link, where, exclude, fence in tqdm(rows, desc="sources", unit="row"):
         key = doc_type or UNTYPED
         if wanted and key not in wanted:
             continue
@@ -152,7 +156,9 @@ def build(args) -> tuple[list[Path], list[str]]:
             failed.add(key)
             continue
         docs = [d for d in docs if not any(fnmatchcase(d["metadata"]["source"], g) for g in exclude)]
-        if not docs:  # wrong git subdir, JS-only page, scanned PDF: as lost as a row that fails
+        if fence:
+            docs = sources.fenced(docs, fence)
+        if not docs:  # wrong git subdir, JS-only page, scanned PDF, no such fence: as lost as a row that fails
             warn(f"{where}: {source_type} {link} -> 0 documents")
             failed.add(key)
             continue

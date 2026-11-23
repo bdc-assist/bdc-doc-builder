@@ -35,11 +35,13 @@ To run the three repos together from scratch, follow "From clone to chat" in r-a
 
 ## sources.yaml
 
-A YAML list of entries with `source_type`, optional `doc_type`, `link`, and optional `exclude`. `#`
+A YAML list of entries with `source_type`, optional `doc_type`, `link`, and optional `exclude` and `fence`. `#`
 comments as usual; relative links resolve against the file's own folder. `exclude` is a glob or a
 list of globs matched against each document's `source` (for a `path` or `git` directory, the file's
 path relative to the link; `*` also crosses `/`); matching documents are dropped, so one folder can be
-split between doc_types.
+split between doc_types. `fence` is a fenced-code info string (`form`): the entry keeps only those blocks,
+each a whole chunk of a document whose `source` gets a `#form` suffix (the file stays a document of its
+own entry too) and whose context is the full page; files without one are dropped.
 
 | source_type | link | notes |
 | --- | --- | --- |
@@ -65,7 +67,9 @@ is refused when a doc_type was skipped, as it would leave that doc_type empty. A
 github.com/stagecc/bdc-llm, the Markdown export of the BDC GitBook and website (private: the clone
 uses your git credentials): `docs/` (`docs`); `site/` (`page`) minus what the other rows take, which
 are `site/news/latest-updates` (`update`), `site/news/events` (`event`), `site/about/bdc/fellows.md`
-(`fellow`) and `site/help/faqs.md` (`faq`). Every bdc-llm file's frontmatter `url` is its live page,
+(`fellow`) and `site/help/faqs.md` (`faq`). The ```` ```form ```` blocks of `site/` pages (Get Help, Contact
+BDC, cloud credits, ...: field names, labels, choices) are also `form` documents, for prefilling forms
+(bdc-assist#64). Every bdc-llm file's frontmatter `url` is its live page,
 so citations link to the website and GitBook rather than the private repo; events and updates get
 their `date` from frontmatter too. Videos come from the transcripts sheet reduced to
 `examples/bdc/videos.yaml` (`video`).
@@ -76,7 +80,7 @@ github.com/fastapi/fastapi: the tutorial, advanced, how-to and deployment folder
 files, inheriting `page`), and the release notes (`release`). Its code samples are not indexed:
 the pages pull them in with `{* docs_src/... *}` lines, which stay as text.
 
-`examples/fixture/` is a fake, BDC-shaped corpus for tests and rehearsals: invented text in all seven
+`examples/fixture/` is a fake, BDC-shaped corpus for tests and rehearsals: invented text in all eight
 BDC doc_types with their real metadata shapes, built offline (markdown, local transcripts). Its
 `extras.yaml` holds ready-made rows for the shapes only networked sources produce; the tests write them
 to `extras.pkl` at run time. r-doc-mcp's `examples/fixture` serves it in its own `fixture` collection.

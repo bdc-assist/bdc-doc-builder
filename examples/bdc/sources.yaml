@@ -22,6 +22,11 @@
 - source_type: git
   doc_type: faq
   link: https://github.com/stagecc/bdc-llm#site/help/faqs.md
+- source_type: git
+  doc_type: form
+  link: https://github.com/stagecc/bdc-llm#site
+  fence: form   # each page's ```form block (field names, labels, choices) as a form document, source <file>#form
+  exclude: news/latest-updates/*   # their forms are copies of stay-connected's newsletter signup
 - source_type: transcripts
   doc_type: video
   link: videos.yaml   # video_url: YouTube URL, transcript: SRT (Drive links)
